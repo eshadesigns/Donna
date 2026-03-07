@@ -1,0 +1,938 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DONNA — Personal Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@300;400;500&family=IBM+Plex+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet">
+
+  <style>
+    /* ══════════════════════════════
+       TOKENS
+    ══════════════════════════════ */
+    :root {
+      --red:          #C8000A;
+      --red-dim:      rgba(200,0,10,0.15);
+      --red-glow:     rgba(200,0,10,0.3);
+      --ink:          #090909;
+      --panel-dark:   #0d0d0d;
+      --panel-light:  #f5f4f2;
+      --border:       rgba(255,255,255,0.08);
+      --border-cal:   rgba(0,0,0,0.08);
+      --text:         #e2e2e2;
+      --text-dim:     #555;
+      --text-mid:     #888;
+      --white:        #f5f5f5;
+      --green:        #00c46a;
+      --divider-w:    3px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      font-family: 'IBM Plex Mono', monospace;
+      background: var(--ink);
+    }
+
+    /* subtle scanlines */
+    body::after {
+      content: '';
+      position: fixed; inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 3px, rgba(0,0,0,0.018) 3px, rgba(0,0,0,0.018) 4px);
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ══════════════════════════════
+       TOP BAR
+    ══════════════════════════════ */
+    .topbar {
+      height: 48px;
+      background: var(--ink);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .topbar::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, var(--red) 0%, transparent 35%);
+    }
+
+    .tb-left {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .wordmark {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 28px;
+      letter-spacing: 0.16em;
+      color: var(--white);
+      line-height: 1;
+    }
+
+    .wordmark em { color: var(--red); font-style: normal; }
+
+    .tb-tag {
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      padding-left: 18px;
+      border-left: 1px solid var(--border);
+    }
+
+    .tb-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .tb-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+    }
+
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 5px var(--green);
+      animation: pulse-g 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-g { 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+    .tb-voice {
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      color: var(--text-mid);
+      cursor: pointer;
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      transition: all 0.15s;
+      user-select: none;
+    }
+
+    .tb-voice:hover { border-color: var(--red); color: var(--red); }
+
+    /* ══════════════════════════════
+       MAIN SPLIT
+    ══════════════════════════════ */
+    .split {
+      display: flex;
+      height: calc(100vh - 48px);
+      overflow: hidden;
+    }
+
+    /* ══════════════════════════════
+       LEFT — CALENDAR
+    ══════════════════════════════ */
+    .cal-panel {
+      width: 40%;
+      min-width: 300px;
+      background: var(--panel-light);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .cal-header {
+      height: 44px;
+      background: white;
+      border-bottom: 1px solid var(--border-cal);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      flex-shrink: 0;
+    }
+
+    .cal-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 18px;
+      letter-spacing: 0.14em;
+      color: #1a1a1a;
+    }
+
+    .cal-title span { color: var(--red); }
+
+    .cal-meta {
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      color: #aaa;
+      text-transform: uppercase;
+    }
+
+    .cal-frame-wrap {
+      flex: 1;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .cal-frame-wrap iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      display: block;
+    }
+
+    /* ══════════════════════════════
+       DIVIDER
+    ══════════════════════════════ */
+    .divider {
+      width: var(--divider-w);
+      background: var(--ink);
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .divider::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(180deg,
+        transparent 0%,
+        var(--red) 20%,
+        var(--red) 80%,
+        transparent 100%
+      );
+      opacity: 0.6;
+    }
+
+    /* ══════════════════════════════
+       RIGHT — CHAT
+    ══════════════════════════════ */
+    .chat-panel {
+      flex: 1;
+      background: var(--panel-dark);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-width: 0;
+    }
+
+    /* chat top bar */
+    .chat-header {
+      height: 44px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .chat-header::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, var(--red) 0%, transparent 50%);
+    }
+
+    .chat-hdr-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .donna-avatar {
+      width: 26px; height: 26px;
+      border-radius: 50%;
+      background: var(--red);
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 14px;
+      color: white;
+      flex-shrink: 0;
+    }
+
+    .donna-name {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 18px;
+      letter-spacing: 0.14em;
+      color: var(--white);
+    }
+
+    .donna-sub {
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      color: var(--text-dim);
+      text-transform: uppercase;
+    }
+
+    .chat-hdr-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .hdr-btn {
+      padding: 4px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.15s;
+    }
+
+    .hdr-btn:hover { border-color: var(--red); color: var(--red); }
+
+    /* ══════════════════════════════
+       MESSAGE AREA
+    ══════════════════════════════ */
+    .msg-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      scroll-behavior: smooth;
+    }
+
+    .msg-area::-webkit-scrollbar { width: 3px; }
+    .msg-area::-webkit-scrollbar-thumb { background: var(--border); }
+
+    /* empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      flex: 1;
+      gap: 12px;
+      padding: 40px;
+      animation: fadeIn 0.7s ease both;
+    }
+
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+    .empty-d {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 96px;
+      color: rgba(200,0,10,0.07);
+      line-height: 1;
+      letter-spacing: 0.1em;
+    }
+
+    .empty-title {
+      font-family: 'Bebas Neue', sans-serif;
+      font-size: 22px;
+      letter-spacing: 0.15em;
+      color: var(--text-mid);
+    }
+
+    .empty-sub {
+      font-size: 11px;
+      color: var(--text-dim);
+      letter-spacing: 0.08em;
+      text-align: center;
+      line-height: 1.8;
+      max-width: 320px;
+    }
+
+    .empty-cmds {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      margin-top: 8px;
+      width: 100%;
+      max-width: 360px;
+    }
+
+    .ecmd {
+      padding: 9px 14px;
+      border: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-dim);
+      cursor: pointer;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      letter-spacing: 0.03em;
+    }
+
+    .ecmd:hover { border-color: var(--red); color: var(--white); background: var(--red-dim); }
+    .ecmd:hover .ecmd-arr { opacity: 1; }
+
+    .ecmd-n { color: var(--red); font-size: 10px; }
+    .ecmd-t { flex: 1; }
+    .ecmd-arr { color: var(--red); opacity: 0; transition: opacity 0.15s; font-size: 13px; }
+
+    /* ── Messages ── */
+    .msg-block {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 18px;
+      animation: msgIn 0.2s ease both;
+    }
+
+    @keyframes msgIn { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+
+    .msg-block.user { align-items: flex-end; }
+    .msg-block.donna { align-items: flex-start; }
+
+    .msg-label {
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      margin-bottom: 5px;
+    }
+
+    .msg-label.user-lbl { color: var(--red); }
+    .msg-label.donna-lbl { color: var(--text-dim); }
+
+    .msg-bubble {
+      font-family: 'IBM Plex Sans', sans-serif;
+      font-size: 13px;
+      line-height: 1.7;
+      font-weight: 300;
+      max-width: 78%;
+      padding: 12px 16px;
+      border-radius: 2px;
+    }
+
+    .msg-block.user .msg-bubble {
+      background: var(--red-dim);
+      border: 1px solid rgba(200,0,10,0.25);
+      color: #ffaaaa;
+      border-radius: 8px 2px 8px 8px;
+    }
+
+    .msg-block.donna .msg-bubble {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--red);
+      color: var(--text);
+      border-radius: 2px 8px 8px 8px;
+    }
+
+    .msg-time {
+      font-size: 9px;
+      color: var(--text-dim);
+      margin-top: 4px;
+      letter-spacing: 0.06em;
+    }
+
+    /* ── Working ── */
+    .working-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      margin-bottom: 18px;
+    }
+
+    .working-label {
+      font-size: 9px;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+      color: var(--red);
+      margin-bottom: 5px;
+    }
+
+    .working-inner {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      border-left: 2px solid var(--red);
+      padding: 12px 16px;
+      border-radius: 2px 8px 8px 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .working-txt {
+      font-size: 11px;
+      color: var(--text-mid);
+      letter-spacing: 0.06em;
+      animation: blink 1.1s ease-in-out infinite;
+    }
+
+    @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.2;} }
+
+    .prog-track {
+      height: 2px;
+      width: 160px;
+      background: var(--border);
+      overflow: hidden;
+    }
+
+    .prog-fill {
+      height: 100%;
+      background: var(--red);
+      animation: scan 1.4s ease-in-out infinite;
+    }
+
+    @keyframes scan { 0%{transform:translateX(-100%);width:35%;} 50%{width:55%;} 100%{transform:translateX(280%);width:35%;} }
+
+    /* ══════════════════════════════
+       INPUT BAR
+    ══════════════════════════════ */
+    .input-bar {
+      border-top: 1px solid var(--border);
+      background: var(--ink);
+      padding: 12px 20px 16px;
+      flex-shrink: 0;
+      position: relative;
+    }
+
+    .input-bar::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, var(--red) 0%, transparent 35%);
+    }
+
+    .input-row {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      background: rgba(255,255,255,0.03);
+      border: 1px solid var(--border);
+      padding: 8px 12px;
+      transition: border-color 0.2s;
+    }
+
+    .input-row:focus-within {
+      border-color: rgba(200,0,10,0.4);
+      box-shadow: 0 0 0 3px rgba(200,0,10,0.08);
+    }
+
+    .input-prompt {
+      font-size: 14px;
+      color: var(--red);
+      padding-bottom: 1px;
+      user-select: none;
+      font-weight: 500;
+      flex-shrink: 0;
+    }
+
+    #msg-input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--white);
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      resize: none;
+      max-height: 90px;
+      overflow-y: auto;
+      caret-color: var(--red);
+      letter-spacing: 0.03em;
+    }
+
+    #msg-input::placeholder { color: var(--text-dim); }
+    #msg-input::-webkit-scrollbar { width: 2px; }
+
+    .send-btn {
+      width: 32px; height: 32px;
+      background: var(--red);
+      border: none;
+      border-radius: 2px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.15s;
+      flex-shrink: 0;
+    }
+
+    .send-btn:hover { background: #e5000c; }
+    .send-btn:active { transform: scale(0.95); }
+
+    .send-btn svg { width: 14px; height: 14px; fill: white; }
+
+    .input-hint {
+      margin-top: 7px;
+      font-size: 9px;
+      color: var(--text-dim);
+      letter-spacing: 0.1em;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .voice-indicator {
+      display: none;
+      align-items: center;
+      gap: 6px;
+      font-size: 9px;
+      color: var(--red);
+      letter-spacing: 0.1em;
+    }
+
+    .voice-indicator.active { display: flex; }
+
+    .voice-pulse {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--red);
+      animation: pulsered 0.8s ease-in-out infinite;
+    }
+
+    @keyframes pulsered { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:0.3;transform:scale(1.4);} }
+
+    /* ══════════════════════════════
+       TOAST
+    ══════════════════════════════ */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--panel-dark);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--red);
+      padding: 10px 16px;
+      font-size: 10px;
+      color: var(--text-mid);
+      letter-spacing: 0.07em;
+      opacity: 0;
+      transform: translateY(6px);
+      transition: all 0.22s;
+      z-index: 9000;
+      pointer-events: none;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    /* ══════════════════════════════
+       RESPONSIVE
+    ══════════════════════════════ */
+    @media (max-width: 860px) {
+      .split { flex-direction: column; }
+      .cal-panel { width: 100%; min-width: unset; height: 45vh; flex-shrink: 0; }
+      .divider { width: 100%; height: var(--divider-w); }
+      .divider::before {
+        background: linear-gradient(90deg,
+          transparent 0%,
+          var(--red) 20%,
+          var(--red) 80%,
+          transparent 100%
+        );
+      }
+      .chat-panel { flex: 1; }
+    }
+
+    @media (max-width: 500px) {
+      .tb-tag { display: none; }
+      .cal-header .cal-meta { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ══ TOP BAR ══ -->
+<div class="topbar">
+  <div class="tb-left">
+    <div class="wordmark">D<em>O</em>NNA</div>
+    <div class="tb-tag">Personal AI Assistant</div>
+  </div>
+  <div class="tb-right">
+    <div class="tb-status">
+      <div class="status-dot"></div>
+      Operational
+    </div>
+    <div class="tb-voice" id="voice-toggle" onclick="toggleVoice()">Voice: ON</div>
+  </div>
+</div>
+
+<!-- ══ SPLIT ══ -->
+<div class="split">
+
+  <!-- ══ LEFT: CALENDAR ══ -->
+  <div class="cal-panel">
+    <div class="cal-header">
+      <div class="cal-title">SCH<span>ED</span>ULE</div>
+      <div class="cal-meta">Read-only · Google Calendar</div>
+    </div>
+    <div class="cal-frame-wrap">
+      <!--
+        REPLACE the src below with your Google Calendar embed URL.
+        Format: https://calendar.google.com/calendar/embed?src=YOUR_CALENDAR_ID&ctz=YOUR_TIMEZONE
+        Example: https://calendar.google.com/calendar/embed?src=yourname%40gmail.com&ctz=America%2FNew_York
+      -->
+      <iframe
+        src="https://calendar.google.com/calendar/embed?src=en.usa%23holiday%40group.v.calendar.google.com&ctz=America%2FNew_York&showTitle=0&showNav=1&showDate=1&showPrint=0&showTabs=0&showCalendars=0&showTz=0&mode=MONTH"
+        style="border:0"
+        width="100%"
+        height="100%"
+        frameborder="0"
+        scrolling="no"
+        title="Donna Calendar"
+      ></iframe>
+    </div>
+  </div>
+
+  <!-- ══ DIVIDER ══ -->
+  <div class="divider"></div>
+
+  <!-- ══ RIGHT: CHAT ══ -->
+  <div class="chat-panel">
+
+    <div class="chat-header">
+      <div class="chat-hdr-left">
+        <div class="donna-avatar">D</div>
+        <div>
+          <div class="donna-name">DONNA</div>
+          <div class="donna-sub">AI Business Assistant</div>
+        </div>
+      </div>
+      <div class="chat-hdr-right">
+        <button class="hdr-btn" onclick="clearChat()">Clear</button>
+      </div>
+    </div>
+
+    <!-- MESSAGES -->
+    <div class="msg-area" id="msg-area">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-d">D</div>
+        <div class="empty-title">What needs handling?</div>
+        <div class="empty-sub">Donna researches, calls businesses, and books appointments — so you never have to.</div>
+        <div class="empty-cmds">
+          <div class="ecmd" onclick="useCmd(this)">
+            <span class="ecmd-n">01</span>
+            <span class="ecmd-t">Find the best blowout salon near me</span>
+            <span class="ecmd-arr">→</span>
+          </div>
+          <div class="ecmd" onclick="useCmd(this)">
+            <span class="ecmd-n">02</span>
+            <span class="ecmd-t">Book a dinner reservation Saturday 7pm</span>
+            <span class="ecmd-arr">→</span>
+          </div>
+          <div class="ecmd" onclick="useCmd(this)">
+            <span class="ecmd-n">03</span>
+            <span class="ecmd-t">What are the hours for this business?</span>
+            <span class="ecmd-arr">→</span>
+          </div>
+          <div class="ecmd" onclick="useCmd(this)">
+            <span class="ecmd-n">04</span>
+            <span class="ecmd-t">Add a task to my calendar for tomorrow</span>
+            <span class="ecmd-arr">→</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- INPUT -->
+    <div class="input-bar">
+      <div class="input-row">
+        <span class="input-prompt">&gt;</span>
+        <textarea
+          id="msg-input"
+          placeholder="Tell Donna what you need..."
+          rows="1"
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <button class="send-btn" onclick="sendMessage()" title="Send">
+          <svg viewBox="0 0 24 24"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </div>
+      <div class="input-hint">
+        <span>↵ Enter to send · Shift+Enter for new line</span>
+        <span class="voice-indicator" id="voice-ind">
+          <span class="voice-pulse"></span> Speaking...
+        </span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+<audio id="donna-audio"></audio>
+
+<script>
+  const BACKEND = 'http://localhost:3000';
+  let voiceEnabled = true;
+  let isThinking   = false;
+
+  const msgArea  = document.getElementById('msg-area');
+  const input    = document.getElementById('msg-input');
+  const empty    = document.getElementById('empty-state');
+  const audio    = document.getElementById('donna-audio');
+  const voiceInd = document.getElementById('voice-ind');
+
+  /* ── Auto-resize textarea ── */
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 90) + 'px';
+  });
+
+  /* ── Enter to send ── */
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  });
+
+  function toggleVoice() {
+    voiceEnabled = !voiceEnabled;
+    const btn = document.getElementById('voice-toggle');
+    btn.textContent = `Voice: ${voiceEnabled ? 'ON' : 'OFF'}`;
+    btn.style.color  = voiceEnabled ? '' : 'var(--text-dim)';
+  }
+
+  function useCmd(el) {
+    input.value = el.querySelector('.ecmd-t').textContent.trim();
+    input.focus();
+    input.dispatchEvent(new Event('input'));
+  }
+
+  function clearChat() {
+    msgArea.querySelectorAll('.msg-block, .working-block').forEach(e => e.remove());
+    empty.style.display = 'flex';
+  }
+
+  function hideEmpty() { empty.style.display = 'none'; }
+
+  function ts() {
+    return new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+  }
+
+  function addMsg(text, role) {
+    hideEmpty();
+    const block = document.createElement('div');
+    block.className = `msg-block ${role}`;
+
+    const label = document.createElement('div');
+    label.className = `msg-label ${role === 'user' ? 'user-lbl' : 'donna-lbl'}`;
+    label.textContent = role === 'user' ? 'YOU' : 'DONNA';
+
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.textContent = text;
+
+    const time = document.createElement('div');
+    time.className = 'msg-time';
+    time.textContent = ts();
+
+    block.appendChild(label);
+    block.appendChild(bubble);
+    block.appendChild(time);
+    msgArea.appendChild(block);
+    scrollDown();
+  }
+
+  function showWorking() {
+    hideEmpty();
+    const block = document.createElement('div');
+    block.className = 'working-block';
+    block.id = 'working';
+    block.innerHTML = `
+      <div class="working-label">DONNA</div>
+      <div class="working-inner">
+        <div class="working-txt">Working on it...</div>
+        <div class="prog-track"><div class="prog-fill"></div></div>
+      </div>`;
+    msgArea.appendChild(block);
+    scrollDown();
+  }
+
+  function hideWorking() {
+    const el = document.getElementById('working');
+    if (el) el.remove();
+  }
+
+  function scrollDown() {
+    msgArea.scrollTop = msgArea.scrollHeight;
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 3200);
+  }
+
+  async function playVoice(text) {
+    if (!voiceEnabled) return;
+    try {
+      voiceInd.classList.add('active');
+      const res = await fetch(`${BACKEND}/voice`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (!res.ok) throw new Error('Voice error');
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      audio.src  = url;
+      await audio.play();
+      audio.onended = () => {
+        voiceInd.classList.remove('active');
+        URL.revokeObjectURL(url);
+      };
+    } catch {
+      voiceInd.classList.remove('active');
+    }
+  }
+
+  async function sendMessage() {
+    const text = input.value.trim();
+    if (!text || isThinking) return;
+
+    input.value = '';
+    input.style.height = 'auto';
+    isThinking = true;
+
+    addMsg(text, 'user');
+    showWorking();
+
+    try {
+      const res = await fetch(`${BACKEND}/ask`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      });
+
+      const data = await res.json();
+      hideWorking();
+      const reply = data.reply || 'Information not found.';
+      addMsg(reply, 'donna');
+      playVoice(reply);
+
+    } catch {
+      hideWorking();
+      addMsg("Can't reach backend. Make sure the server is running on port 3000.", 'donna');
+      showToast('Backend unreachable — run: npm start');
+    }
+
+    isThinking = false;
+    input.focus();
+  }
+
+  window.addEventListener('load', () => input.focus());
+</script>
+</body>
+</html>

@@ -16,13 +16,14 @@
     "googleapis": "^171.4.0",
     "mongodb": "^7.1.0",
     "next": "16.1.6",
+    "next.js": "^1.0.3",
     "node-cron": "^4.2.1",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^20.19.37",
     "@types/node-cron": "^3.0.11",
     "@types/react": "^19",
     "@types/react-dom": "^19",
