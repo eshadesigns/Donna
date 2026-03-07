@@ -2,18 +2,26 @@ import { NextRequest } from "next/server";
 import { summarizeTranscript } from "@/lib/gemini";
 import { storeCallLog, updateQueueItemStatus } from "@/lib/mongo";
 
-//POST /api/result — Vapi webhook fires here when a call ends
+//Vapi webhook — fires when a call ends with a full transcript
 export async function POST(req: NextRequest) {
   const body = await req.json() as {
     message?: {
       type: string;
-      call?: { id: string };
+      call?: {
+        id: string;
+        assistant?: {
+          metadata?: {
+            businessName?: string;
+            task?: string;
+            userId?: string;
+          };
+        };
+      };
       artifact?: { transcript?: string };
       endedReason?: string;
     };
   };
 
-  //Vapi wraps events in a message object
   const msg = body.message;
   if (!msg || msg.type !== "end-of-call-report") {
     return Response.json({ received: true });
@@ -22,12 +30,12 @@ export async function POST(req: NextRequest) {
   const callId = msg.call?.id ?? "unknown";
   const transcript = msg.artifact?.transcript ?? "";
   const endedReason = msg.endedReason ?? "";
-
-  //Business name comes from call metadata — wired up fully in Step 6
-  const businessName = "unknown";
+  const metadata = msg.call?.assistant?.metadata;
+  const businessName = metadata?.businessName ?? "unknown";
+  const task = metadata?.task ?? "appointment booking";
 
   try {
-    const summary = await summarizeTranscript(transcript, "appointment booking");
+    const summary = await summarizeTranscript(transcript, task);
 
     await storeCallLog({
       callId,
