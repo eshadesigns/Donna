@@ -3,7 +3,7 @@ import { getCachedResult, storeResult } from "./mongo";
 
 const client = tavily({ apiKey: process.env.TAVILY_API_KEY! });
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+//Types
 
 export interface BusinessResult {
   name: string;
@@ -23,7 +23,7 @@ export interface SearchResult {
   source: string;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+//Helpers
 
 function extractPhone(text: string): string | null {
   const match = text.match(/(\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4})/);
@@ -42,8 +42,7 @@ function extractBookingUrl(text: string, urls: string[]): string | null {
   return urlMatch ? urlMatch[0] : null;
 }
 
-// ─── Search nearby businesses ─────────────────────────────────────────────────
-// Returns a list of businesses matching the query near a location.
+//Search nearby businesses
 
 export async function searchNearby(
   query: string,
@@ -71,8 +70,7 @@ export async function searchNearby(
   return businesses;
 }
 
-// ─── Search a specific business for targeted info ─────────────────────────────
-// Checks MongoDB cache first. If miss, hits Tavily and caches the result.
+//Search a specific business — checks cache first
 
 export async function searchBusiness(
   businessName: string,

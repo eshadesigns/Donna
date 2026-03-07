@@ -3,7 +3,7 @@ import { MongoClient, Collection, Document } from "mongodb";
 const uri = process.env.MONGODB_URI!;
 const DB_NAME = "donna";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+//Types
 
 export interface BusinessCache {
   businessName: string;
@@ -41,7 +41,7 @@ export interface CallLog {
   createdAt: Date;
 }
 
-// ─── Singleton client (safe for Next.js hot reload) ──────────────────────────
+//Singleton client — reused across Next.js requests
 
 declare global {
   // eslint-disable-next-line no-var
@@ -61,7 +61,7 @@ async function getDb() {
   return client.db(DB_NAME);
 }
 
-// ─── Collection helpers ───────────────────────────────────────────────────────
+//Collection helpers
 
 async function businessCacheCollection(): Promise<Collection<BusinessCache>> {
   const db = await getDb();
@@ -78,7 +78,7 @@ async function callLogsCollection(): Promise<Collection<CallLog>> {
   return db.collection<CallLog>("call_logs");
 }
 
-// ─── Cache ────────────────────────────────────────────────────────────────────
+//Cache
 
 export async function getCachedResult(
   businessName: string,
@@ -112,7 +112,7 @@ export async function storeResult(
   );
 }
 
-// ─── Call Queue ───────────────────────────────────────────────────────────────
+//Call queue
 
 export async function addToQueue(
   item: Omit<CallQueueItem, "status" | "createdAt">
@@ -147,7 +147,7 @@ export async function updateQueueItemStatus(
   );
 }
 
-// ─── Call Logs ────────────────────────────────────────────────────────────────
+//Call logs
 
 export async function storeCallLog(log: Omit<CallLog, "createdAt">): Promise<void> {
   const col = await callLogsCollection();
