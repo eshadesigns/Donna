@@ -2,6 +2,16 @@ import cron from "node-cron";
 import { getOpenJobs, updateQueueItemStatus } from "./mongo";
 import { triggerCall } from "./vapi";
 
+// node-cron v4 removed the recoverMissedExecutions option. When the process is
+// suspended (e.g. laptop sleep) and resumes, it floods the log with one WARN
+// per missed 5-minute slot. Suppress only that specific pattern — everything
+// else from console.warn still passes through.
+const _warn = console.warn;
+console.warn = (...args: unknown[]) => {
+  if (typeof args[0] === "string" && args[0].includes("[NODE-CRON]") && args[0].includes("missed execution")) return;
+  _warn.apply(console, args);
+};
+
 let started = false;
 
 export function startScheduler() {
@@ -10,7 +20,6 @@ export function startScheduler() {
 
   console.log("Donna scheduler started — checking queue every 5 minutes");
 
-  //Run every 5 minutes
   cron.schedule("*/5 * * * *", async () => {
     try {
       const jobs = await getOpenJobs();
@@ -21,7 +30,7 @@ export function startScheduler() {
 
       for (const job of jobs) {
         try {
-          //Mark in-progress before calling so we don't double-fire
+          // Mark in-progress before calling so we don't double-fire
           await updateQueueItemStatus(job.businessName, "in-progress");
 
           const { callId } = await triggerCall(job.phone, {

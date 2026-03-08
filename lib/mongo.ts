@@ -50,15 +50,25 @@ declare global {
 
 function getClient(): MongoClient {
   if (!global._mongoClient) {
-    global._mongoClient = new MongoClient(uri);
+    global._mongoClient = new MongoClient(uri, {
+      tls: true,
+      serverSelectionTimeoutMS: 8000,
+      connectTimeoutMS: 10000,
+    });
   }
   return global._mongoClient;
 }
 
 async function getDb() {
-  const client = getClient();
-  await client.connect();
-  return client.db(DB_NAME);
+  try {
+    const client = getClient();
+    await client.connect();
+    return client.db(DB_NAME);
+  } catch (err) {
+    // Reset broken singleton so next call gets a fresh client
+    global._mongoClient = undefined;
+    throw err;
+  }
 }
 
 //Collection helpers

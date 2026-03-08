@@ -1,11 +1,7 @@
-import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
+import OpenAI from "openai";
 import type { BusinessResult } from "./tavily";
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
-
-function getModel() {
-  return genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-}
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 //Types
 
@@ -47,52 +43,124 @@ export interface TranscriptSummary {
   nextAction: "confirm" | "move_to_next" | "retry";
 }
 
-//Generate clarifying question cards 
+// ── Query intent parser ──────────────────────────────────────────────────────
+// Runs first on every raw query. Normalises sloppy/voice input into a clean
+// structured intent so all downstream steps work reliably.
+
+export interface ParsedIntent {
+  enrichedQuery: string;         // Rewritten, clear description of what the user wants
+  intent: "business_search" | "calendar_add" | "calendar_delete" | "cancel" | "other";
+  service?: string;              // e.g. "hair stylist", "Italian restaurant"
+  dateTime?: string;             // ISO 8601 if mentioned
+  addToCalendar?: boolean;       // User wants event added to calendar after booking
+  noFurtherQuestions?: boolean;  // User explicitly said no more questions
+  locationMentioned?: string;    // Explicit location if stated in query
+}
+
+export async function parseIntent(
+  rawQuery: string,
+  todayISO: string
+): Promise<ParsedIntent> {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna's intent parser. Today is ${todayISO}.
+
+Your job: take a raw user message (possibly messy, from voice transcription) and return a clean structured JSON intent that Donna can act on reliably.
+
+Return JSON:
+{
+  "enrichedQuery": string,          // Rewrite the query as a clear, detailed task description (1-2 sentences). Fix grammar, expand abbreviations, make implicit info explicit.
+  "intent": "business_search" | "calendar_add" | "calendar_delete" | "cancel" | "other",
+  "service": string | null,         // What type of business/service (e.g. "hair salon", "Italian restaurant")
+  "dateTime": string | null,        // ISO 8601 — convert relative times like "tomorrow 8pm" to absolute. Use local time (no UTC offset needed).
+  "addToCalendar": boolean,         // true if user says "add to calendar", "put it on my calendar", etc.
+  "noFurtherQuestions": boolean,    // true if user says "no further questions", "no questions", "just do it", etc.
+  "locationMentioned": string | null // Location if explicitly stated by user (e.g. "near downtown Austin")
+}
+
+Examples:
+- "hey book me a hair appointment tmrw 8pm no questions add to cal" → intent: business_search, service: hair salon, dateTime: <tomorrow 8pm>, addToCalendar: true, noFurtherQuestions: true
+- "add dentist appt thursday 3pm" → intent: calendar_add, dateTime: <thursday 3pm>
+- "delete all my appointments" / "remove every event" / "clear my calendar" → intent: calendar_delete
+- "stop calling" → intent: cancel`,
+      },
+      { role: "user", content: rawQuery },
+    ],
+  });
+
+  try {
+    return JSON.parse(completion.choices[0].message.content ?? "{}") as ParsedIntent;
+  } catch {
+    return { enrichedQuery: rawQuery, intent: "other" };
+  }
+}
+
+//Generate clarifying question cards
 
 export async function generateClarifyingQuestions(
   query: string
 ): Promise<ClarifyingQuestion[]> {
-  const model = getModel();
-
-  const result = await model.generateContent({
-    contents: [
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna, a personal AI assistant. Generate clarifying questions as JSON.
+Return: { "questions": [ { "id": string, "icon": string, "label": string, "question": string, "inputType": "text"|"select"|"location", "options": string[] | undefined } ] }
+Rules:
+- If the user says "no further questions", "no more questions", "no questions", or similar, skip all optional questions — BUT still ask for location if it is missing and the task requires a local search (location is non-negotiable).
+- If the user has already provided all needed information (date, time, location, etc.), return { "questions": [] }.
+- For calendar tasks (add event, create event, schedule, put on calendar): ONLY ask if date/time is missing. Never ask for location or extra details.
+- For local business searches (salons, restaurants, stores, spas, etc.): ALWAYS ask for location if not provided, even if user said "no further questions". Without location, the search cannot run.
+- Maximum 3 questions. Only ask what is truly essential to complete the task.`,
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `You are Donna, a personal AI assistant. A user just asked: "${query}"
-
-Generate the most important clarifying questions Donna needs answered before she can act autonomously. Only ask what is truly needed — no more than 5 questions.
-
-Always include location if it's a local search. Always include time/date if booking is involved.
-
-Return a JSON array of question objects.`,
-          },
-        ],
+        content: `User asked: "${query}"`,
       },
     ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: SchemaType.ARRAY,
-        items: {
-          type: SchemaType.OBJECT,
-          properties: {
-            id: { type: SchemaType.STRING },
-            icon: { type: SchemaType.STRING },
-            label: { type: SchemaType.STRING },
-            question: { type: SchemaType.STRING },
-            inputType: { type: SchemaType.STRING },
-            options: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
-          },
-          required: ["id", "icon", "label", "question", "inputType"],
-        },
-      },
-    },
   });
 
-  const text = result.response.text();
-  return JSON.parse(text) as ClarifyingQuestion[];
+  const raw = completion.choices[0].message.content ?? "{}";
+  const parsed = JSON.parse(raw) as { questions: ClarifyingQuestion[] };
+  return parsed.questions;
+}
+
+//Detect if the query is a calendar action and extract event details
+export interface CalendarEventExtract {
+  isCalendarAction: boolean;
+  title?: string;
+  dateTime?: string; // ISO string, relative to today if needed
+  durationMinutes?: number;
+  location?: string;
+  description?: string;
+}
+
+export async function extractCalendarIntent(
+  query: string,
+  todayISO: string
+): Promise<CalendarEventExtract> {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna's intent classifier. Today's date is ${todayISO}.
+Determine if the user wants to add/create/schedule a calendar event.
+If yes, extract the event details.
+Return JSON: { "isCalendarAction": boolean, "title": string, "dateTime": string (ISO 8601, infer year/timezone as local), "durationMinutes": number (default 60), "location": string|null, "description": string|null }
+If not a calendar action, return { "isCalendarAction": false }.`,
+      },
+      { role: "user", content: query },
+    ],
+  });
+  return JSON.parse(completion.choices[0].message.content ?? "{}") as CalendarEventExtract;
 }
 
 //Evaluate whether search results are sufficient or Donna needs to call
@@ -101,38 +169,22 @@ export async function evaluateSearchResults(
   query: string,
   results: BusinessResult[]
 ): Promise<"sufficient" | "insufficient"> {
-  const model = getModel();
-
-  const result = await model.generateContent({
-    contents: [
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna's decision engine. Return JSON: { "verdict": "sufficient" | "insufficient" }`,
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `You are Donna's decision engine. A user asked: "${query}"
-
-Here are the web search results:
-${results.map((r, i) => `${i + 1}. ${r.name}: ${r.description}`).join("\n")}
-
-Are these results sufficient to answer the user's query, or does Donna need to call businesses directly?
-Return a JSON object with a single field "verdict" that is either "sufficient" or "insufficient".`,
-          },
-        ],
+        content: `User asked: "${query}"\n\nSearch results:\n${results.map((r, i) => `${i + 1}. ${r.name}: ${r.description}`).join("\n")}\n\nAre these results sufficient to answer the query?`,
       },
     ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: SchemaType.OBJECT,
-        properties: {
-          verdict: { type: SchemaType.STRING },
-        },
-        required: ["verdict"],
-      },
-    },
   });
 
-  const parsed = JSON.parse(result.response.text());
+  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}") as { verdict: string };
   return parsed.verdict as "sufficient" | "insufficient";
 }
 
@@ -143,61 +195,40 @@ export async function scoreAndRankResults(
   results: BusinessResult[],
   prefs: UserPrefs
 ): Promise<RankedBusiness[]> {
-  const model = getModel();
-
-  const result = await model.generateContent({
-    contents: [
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna's scoring engine. Score each business 1-10 based on how well it matches the query and preferences. Return JSON: { "businesses": [ { "name", "address", "phone", "onlineBookingUrl", "description", "url", "score", "reasoning" } ] } ranked best-first.`,
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `You are Donna's scoring engine. A user asked: "${query}"
+        content: `Query: "${query}"
 
 User preferences:
-${Object.entries(prefs)
-  .filter(([, v]) => v)
-  .map(([k, v]) => `- ${k}: ${v}`)
-  .join("\n")}
+${Object.entries(prefs).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${v}`).join("\n")}
 
-Businesses found:
-${results
-  .map(
-    (r, i) => `${i + 1}. ${r.name}
+Businesses:
+${results.map((r, i) => `${i + 1}. ${r.name}
    Address: ${r.address}
-   Phone: ${r.phone || "unknown"}
-   Online booking: ${r.onlineBookingUrl || "none"}
-   Description: ${r.description}`
-  )
-  .join("\n\n")}
-
-Score each business from 1–10 based on how well it matches the query and user preferences. Return them ranked best-first. Include a brief reasoning for each score.`,
-          },
-        ],
+   Phone: ${r.phone || ""}
+   Online booking URL: ${r.onlineBookingUrl || ""}
+   Description: ${r.description}`).join("\n\n")}`,
       },
     ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: SchemaType.ARRAY,
-        items: {
-          type: SchemaType.OBJECT,
-          properties: {
-            name: { type: SchemaType.STRING },
-            address: { type: SchemaType.STRING },
-            phone: { type: SchemaType.STRING },
-            onlineBookingUrl: { type: SchemaType.STRING },
-            description: { type: SchemaType.STRING },
-            url: { type: SchemaType.STRING },
-            score: { type: SchemaType.NUMBER },
-            reasoning: { type: SchemaType.STRING },
-          },
-          required: ["name", "score", "reasoning"],
-        },
-      },
-    },
   });
 
-  return JSON.parse(result.response.text()) as RankedBusiness[];
+  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}") as { businesses: RankedBusiness[] };
+  //Normalize "none"/"unknown"/empty strings to null, sort best-first
+  return parsed.businesses
+    .map((b) => ({
+      ...b,
+      phone: b.phone && b.phone !== "none" && b.phone !== "unknown" ? b.phone : null,
+      onlineBookingUrl: b.onlineBookingUrl && b.onlineBookingUrl !== "none" && b.onlineBookingUrl !== "unknown" && b.onlineBookingUrl.startsWith("http") ? b.onlineBookingUrl : null,
+    }))
+    .sort((a, b) => b.score - a.score);
 }
 
 //Summarize a Vapi call transcript and extract booking result
@@ -206,41 +237,20 @@ export async function summarizeTranscript(
   transcript: string,
   originalQuery: string
 ): Promise<TranscriptSummary> {
-  const model = getModel();
-
-  const result = await model.generateContent({
-    contents: [
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna's transcript analyzer. Extract booking outcome from the call. Return JSON: { "booked": boolean, "bookingTime": string|undefined, "bookingPrice": string|undefined, "stylistName": string|undefined, "notes": string, "nextAction": "confirm"|"move_to_next"|"retry" }`,
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `You are Donna's transcript analyzer. A call was made to book: "${originalQuery}"
-
-Call transcript:
-${transcript}
-
-Extract the booking outcome. Was an appointment booked? If so, what time, price, and stylist?
-Determine the next action: "confirm" if booked, "move_to_next" if they can't help, "retry" if call failed or no answer.`,
-          },
-        ],
+        content: `Booking task: "${originalQuery}"\n\nTranscript:\n${transcript}`,
       },
     ],
-    generationConfig: {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: SchemaType.OBJECT,
-        properties: {
-          booked: { type: SchemaType.BOOLEAN },
-          bookingTime: { type: SchemaType.STRING },
-          bookingPrice: { type: SchemaType.STRING },
-          stylistName: { type: SchemaType.STRING },
-          notes: { type: SchemaType.STRING },
-          nextAction: { type: SchemaType.STRING },
-        },
-        required: ["booked", "notes", "nextAction"],
-      },
-    },
   });
 
-  return JSON.parse(result.response.text()) as TranscriptSummary;
+  return JSON.parse(completion.choices[0].message.content ?? "{}") as TranscriptSummary;
 }
