@@ -42,24 +42,48 @@ function extractBookingUrl(text: string, urls: string[]): string | null {
   return urlMatch ? urlMatch[0] : null;
 }
 
+function extractAddress(text: string, fallback: string): string {
+  const match = text.match(/\d+\s[\w\s.]+(?:St|Ave|Blvd|Dr|Rd|Way|Ln|Ct|Pl|Pkwy|Hwy|Suite|Ste)[.,\s]+[\w\s]+,\s*[A-Z]{2}\s*\d{5}/i);
+  return match ? match[0].trim() : fallback;
+}
+
 //Search nearby businesses
 
 export async function searchNearby(
   query: string,
   location: string,
-  radius: string = "10 miles"
+  _radius: string = "10 miles"
 ): Promise<BusinessResult[]> {
-  const searchQuery = `${query} near ${location} within ${radius} phone number address hours`;
+  // Constrain to business directory domains so Tavily returns actual listings, not blog articles
+  const searchQuery = `${query} in ${location} restaurant bar venue hours phone address reservations`;
 
   const response = await client.search(searchQuery, {
     searchDepth: "advanced",
     maxResults: 10,
     includeAnswer: true,
+    includeDomains: [
+      "yelp.com",
+      "tripadvisor.com",
+      "opentable.com",
+      "resy.com",
+      "google.com/maps",
+      "maps.google.com",
+      "vagaro.com",
+      "booksy.com",
+      "styleseat.com",
+      "mindbodyonline.com",
+      "zocdoc.com",
+    ],
   });
 
-  const businesses: BusinessResult[] = response.results.map((r) => ({
-    name: r.title,
-    address: location, // refined by Gemini later
+  // If domain-restricted search returns too few results, fall back without domain filter
+  const results = response.results.length >= 3
+    ? response.results
+    : (await client.search(searchQuery, { searchDepth: "advanced", maxResults: 10, includeAnswer: true })).results;
+
+  const businesses: BusinessResult[] = results.map((r) => ({
+    name: r.title.replace(/\s*[-|].*$/, "").trim(), // strip "Business Name - Yelp" → "Business Name"
+    address: extractAddress(r.content, location),
     phone: extractPhone(r.content),
     hours: null,
     onlineBookingUrl: extractBookingUrl(r.content, [r.url]),
