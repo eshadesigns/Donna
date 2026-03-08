@@ -178,6 +178,7 @@ export async function updateEvent(
   const calendar = google.calendar({ version: "v3", auth });
 
   const patch: Record<string, unknown> = {};
+  if (changes.businessName) patch.summary = changes.businessName;
   if (changes.dateTime) {
     const start = new Date(changes.dateTime);
     const end = new Date(start.getTime() + (changes.durationMinutes ?? 60) * 60 * 1000);
