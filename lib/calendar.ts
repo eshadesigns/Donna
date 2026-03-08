@@ -12,7 +12,16 @@ export interface BookingDetails {
   price?: string;
   stylistName?: string;
   summary?: string;
+  color?: string; // color name e.g. "yellow", "red", "blue"
 }
+
+const COLOR_MAP: Record<string, string> = {
+  lavender: "1", sage: "2", grape: "3", purple: "3",
+  flamingo: "4", pink: "4", banana: "5", yellow: "5",
+  tangerine: "6", orange: "6", peacock: "7", teal: "7", blue: "7",
+  blueberry: "8", navy: "8", darkblue: "8", basil: "9", green: "9",
+  tomato: "10", red: "10", scarlet: "11",
+};
 
 function getOAuthClient() {
   return new google.auth.OAuth2(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI);
@@ -161,11 +170,17 @@ export async function deleteEvent(
 export async function deleteAllEvents(
   refreshToken: string,
   timeMin = new Date().toISOString(),
-  timeMax = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString()
+  timeMax = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
+  filter?: string
 ): Promise<number> {
   const events = await getEvents(refreshToken, timeMin, timeMax);
-  await Promise.all(events.map((e) => deleteEvent(e.id, refreshToken)));
-  return events.length;
+  const toDelete = filter
+    ? events.filter(e => e.summary?.toLowerCase().includes(filter.toLowerCase()))
+    : events;
+  for (const e of toDelete) {
+    await deleteEvent(e.id, refreshToken);
+  }
+  return toDelete.length;
 }
 
 //Update an existing event if the appointment changes
@@ -186,6 +201,10 @@ export async function updateEvent(
     patch.end = { dateTime: end.toISOString() };
   }
   if (changes.address) patch.location = changes.address;
+  if (changes.color) {
+    const colorId = COLOR_MAP[changes.color.toLowerCase().replace(/\s/g, "")];
+    if (colorId) patch.colorId = colorId;
+  }
 
   await calendar.events.patch({
     calendarId: "primary",

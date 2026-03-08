@@ -21,15 +21,37 @@ export async function POST(req: NextRequest) {
     prefs?: UserPrefs;
     userId?: string;
     userProfile?: { name?: string; location?: string; hairType?: string; budget?: string; notes?: string };
+    confirmedDelete?: { filter: string };
   };
 
   const { query: rawQuery, userId = "default", userProfile } = body;
   // mutable so we can synthesize prefs when we have enough context from intent + profile
   let prefs: UserPrefs | undefined = body.prefs;
 
+  // ── Confirmed delete — short-circuit before intent parsing ─────────────────
+  if (body.confirmedDelete) {
+    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+    if (!refreshToken) {
+      return Response.json({ done: true, message: "Calendar not connected." });
+    }
+    try {
+      const count = await deleteAllEvents(refreshToken, undefined, undefined, body.confirmedDelete.filter);
+      return Response.json({ done: true, message: count > 0 ? `Done. Deleted ${count} event${count === 1 ? "" : "s"}.` : `No matching events found.` });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Calendar error";
+      return Response.json({ error: `Couldn't delete: ${msg}` }, { status: 500 });
+    }
+  }
+
   // ── Step 0: Parse & enrich the raw query ───────────────────────────────────
   const todayISO = new Date().toISOString();
-  const intent = await parseIntent(rawQuery, todayISO);
+  let intent: Awaited<ReturnType<typeof parseIntent>>;
+  try {
+    intent = await parseIntent(rawQuery, todayISO);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "AI service error";
+    return Response.json({ error: `Couldn't process your request: ${msg}` }, { status: 500 });
+  }
 
   // Use the enriched query for all downstream steps
   const query = intent.enrichedQuery || rawQuery;
@@ -50,8 +72,9 @@ export async function POST(req: NextRequest) {
     }
     const fromTitle = intent.editFrom?.toLowerCase();
     const toTitle = intent.editTo;
-    if (!fromTitle || !toTitle) {
-      return Response.json({ error: "I couldn't figure out which event to rename. Try: 'change [old name] to [new name]'." }, { status: 400 });
+    const toColor = intent.editColor;
+    if (!fromTitle || (!toTitle && !toColor)) {
+      return Response.json({ error: "I couldn't figure out what to change. Try: 'rename [event] to [new name]' or 'change [event] color to yellow'." }, { status: 400 });
     }
     try {
       const timeMin = new Date().toISOString();
@@ -61,7 +84,13 @@ export async function POST(req: NextRequest) {
       if (!match) {
         return Response.json({ done: true, message: `I couldn't find an event matching "${intent.editFrom}" in your calendar.` });
       }
-      await updateEvent(match.id, { businessName: toTitle }, refreshToken);
+      const changes: Parameters<typeof updateEvent>[1] = {};
+      if (toTitle) changes.businessName = toTitle;
+      if (toColor) changes.color = toColor;
+      await updateEvent(match.id, changes, refreshToken);
+      if (toColor && !toTitle) {
+        return Response.json({ done: true, message: `Done. Changed "${match.summary}" to ${toColor}.` });
+      }
       return Response.json({ done: true, message: `Done. Renamed "${match.summary}" to "${toTitle}".` });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Calendar error";
@@ -74,12 +103,23 @@ export async function POST(req: NextRequest) {
     if (!refreshToken) {
       return Response.json({ done: true, message: "Calendar not connected — set GOOGLE_REFRESH_TOKEN to enable calendar access." });
     }
+    const filter = intent.deleteFilter;
+    if (!filter) {
+      return Response.json({ done: true, message: "I can only delete specific events — tell me which ones. For example: \"delete my hair appointments\"." });
+    }
     try {
-      const count = await deleteAllEvents(refreshToken);
-      return Response.json({ done: true, message: count > 0 ? `Done! Deleted ${count} event${count === 1 ? "" : "s"} from your calendar.` : "Your calendar is already empty." });
+      // Preview matching events and ask for confirmation
+      const timeMin = new Date().toISOString();
+      const timeMax = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+      const events = await getEvents(refreshToken, timeMin, timeMax);
+      const matching = events.filter(e => e.summary?.toLowerCase().includes(filter.toLowerCase()));
+      if (matching.length === 0) {
+        return Response.json({ done: true, message: `No events matching "${filter}" found in your calendar.` });
+      }
+      return Response.json({ confirmDelete: { filter, events: matching } });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Calendar error";
-      return Response.json({ error: `Couldn't delete events: ${msg}` }, { status: 500 });
+      return Response.json({ error: `Couldn't process delete: ${msg}` }, { status: 500 });
     }
   }
 

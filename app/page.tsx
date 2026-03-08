@@ -48,6 +48,7 @@ type ChatMessage =
   | { type: "donna"; text: string; time: string }
   | { type: "working"; text: string }
   | { type: "clarify"; questions: ClarifyingQuestion[] }
+  | { type: "confirm_delete"; filter: string; events: Array<{ id: string; summary: string; start: string }> }
   | { type: "businesses"; businesses: RankedBusiness[]; updates: BusinessUpdate[] };
 
 function ts() {
@@ -94,8 +95,23 @@ export default function Home() {
   const [callRecords, setCallRecords] = useState<CallRecord[]>([]);
   const [profile, setProfile] = useState<UserProfile>({ name: "", location: "", hairType: "", budget: "", notes: "" });
   useEffect(() => { setProfile(loadProfile()); }, []);
+  interface CalEvent { id: string; summary: string; start: string; end: string; }
+  const [homeEvents, setHomeEvents] = useState<CalEvent[]>([]);
+  const [homeEventsLoading, setHomeEventsLoading] = useState(false);
+  useEffect(() => {
+    if (view !== "home") return;
+    setHomeEventsLoading(true);
+    const timeMin = new Date().toISOString();
+    const timeMax = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+    fetch(`/api/calendar/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}`)
+      .then(r => r.json())
+      .then(data => { if (data.events) setHomeEvents(data.events); })
+      .catch(() => {})
+      .finally(() => setHomeEventsLoading(false));
+  }, [view]);
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
   const recognitionRef = useRef<{ stop(): void } | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const wakeRecognitionRef = useRef<{ stop(): void } | null>(null);
   const listeningRef = useRef(false);
   const wakeJustFiredRef = useRef(false); // prevents wake rec from restarting while main mic is starting
@@ -250,7 +266,7 @@ export default function Home() {
         body: JSON.stringify({ query: q, userProfile: profile }),
       });
 
-      const data = await res.json() as { questions?: ClarifyingQuestion[]; error?: string; done?: boolean; message?: string };
+      const data = await res.json() as { questions?: ClarifyingQuestion[]; error?: string; done?: boolean; message?: string; confirmDelete?: { filter: string; events: Array<{ id: string; summary: string; start: string }> } };
 
       if (data.error) {
         removeWorking();
@@ -264,6 +280,15 @@ export default function Home() {
         setPhase("done");
         appendMessage({ type: "donna", text: data.message, time: ts() });
         if (voiceOn) speakText(data.message);
+        return;
+      }
+
+      if (data.confirmDelete) {
+        removeWorking();
+        setPhase("clarifying");
+        appendMessage({ type: "confirm_delete", filter: data.confirmDelete.filter, events: data.confirmDelete.events });
+        const names = data.confirmDelete.events.map(e => e.summary).join(", ");
+        if (voiceOn) speakText(`I found ${data.confirmDelete.events.length} event${data.confirmDelete.events.length === 1 ? "" : "s"}: ${names}. Should I delete them?`);
         return;
       }
 
@@ -283,6 +308,37 @@ export default function Home() {
       setPhase("error");
       appendMessage({ type: "donna", text: "Something went wrong. Try again.", time: ts() });
     }
+  }
+
+  async function handleConfirmDelete(filter: string, originalQuery: string) {
+    setMessages(prev => prev.filter(m => m.type !== "confirm_delete"));
+    setPhase("searching");
+    appendMessage({ type: "working", text: "Deleting events..." });
+    try {
+      const res = await fetch("/api/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: originalQuery, userProfile: profile, confirmedDelete: { filter } }),
+      });
+      const data = await res.json() as { done?: boolean; message?: string; error?: string };
+      removeWorking();
+      setPhase("done");
+      const msg = data.message ?? data.error ?? "Done.";
+      appendMessage({ type: "donna", text: msg, time: ts() });
+      if (voiceOn) speakText(msg);
+    } catch {
+      removeWorking();
+      setPhase("error");
+      appendMessage({ type: "donna", text: "Something went wrong. Try again.", time: ts() });
+    }
+  }
+
+  function handleCancelDelete() {
+    setMessages(prev => prev.filter(m => m.type !== "confirm_delete"));
+    setPhase("idle");
+    const msg = "Got it — nothing was deleted.";
+    appendMessage({ type: "donna", text: msg, time: ts() });
+    if (voiceOn) speakText(msg);
   }
 
   async function handleAnswers(answers: Record<string, string>) {
@@ -463,76 +519,75 @@ export default function Home() {
   function toggleMic() {
     unlockAudio();
     if (listening) {
-      recognitionRef.current?.stop();
-      setListening(false);
+      mediaRecorderRef.current?.stop();
       return;
     }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const SR = (window as any).SpeechRecognition ?? (window as any).webkitSpeechRecognition;
-    if (!SR) { showToast("Voice input not supported in this browser."); return; }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rec = new SR() as any;
-    rec.continuous = true;       // keep listening through natural pauses
-    rec.interimResults = true;   // show live transcription as user speaks
-    rec.lang = "en-US";
 
-    let finalTranscript = "";
-    let autoSubmitTimer: ReturnType<typeof setTimeout> | null = null;
-    let submitted = false;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      const chunks: BlobPart[] = [];
 
-    function doSubmit() {
-      if (submitted) return;
-      submitted = true;
-      const text = finalTranscript.trim();
-      if (text) { setInputVal(text); handleSend(text); }
-    }
+      // Silence detection via AudioContext analyser
+      const audioCtx = new AudioContext();
+      const analyser = audioCtx.createAnalyser();
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 256;
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+      let hasSpeech = false;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    rec.onresult = (e: any) => {
-      let interim = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        if (e.results[i].isFinal) {
-          finalTranscript += e.results[i][0].transcript + " ";
-        } else {
-          interim = e.results[i][0].transcript;
+      const checkSilence = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+        if (avg > 8) {
+          hasSpeech = true;
+          if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+        } else if (hasSpeech && !silenceTimer) {
+          silenceTimer = setTimeout(() => { mediaRecorder.stop(); }, 2200);
         }
-      }
-      setInputVal((finalTranscript + interim).trim());
+      }, 100);
 
-      // After each final chunk, reset the auto-submit countdown
-      if (e.results[e.results.length - 1]?.isFinal && finalTranscript.trim()) {
-        if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
-        autoSubmitTimer = setTimeout(() => { rec.stop(); doSubmit(); }, 1800);
-      }
-    };
+      mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
 
-    rec.onerror = (e: { error: string }) => {
-      if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
-      wakeJustFiredRef.current = false;
-      setListening(false);
-      if (e.error === "aborted") return;
-      if (e.error === "not-allowed") showToast("Microphone blocked — allow mic access in browser settings.");
-      else if (e.error === "no-speech") showToast("No speech detected. Try again.");
-      else showToast(`Mic error: ${e.error}`);
-    };
+      mediaRecorder.onstop = async () => {
+        clearInterval(checkSilence);
+        if (silenceTimer) clearTimeout(silenceTimer);
+        stream.getTracks().forEach((t) => t.stop());
+        audioCtx.close();
+        wakeJustFiredRef.current = false;
+        setListening(false);
+        if (!hasSpeech || chunks.length === 0) return;
 
-    rec.onend = () => {
-      if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
-      wakeJustFiredRef.current = false;
-      setListening(false);
-      doSubmit(); // submit whatever was captured if not already sent
-    };
+        setInputVal("Transcribing...");
+        const blob = new Blob(chunks, { type: "audio/webm" });
+        const form = new FormData();
+        form.append("audio", blob, "audio.webm");
+        try {
+          const res = await fetch("/api/transcribe", { method: "POST", body: form });
+          const data = await res.json() as { text?: string };
+          if (data.text?.trim()) {
+            setInputVal(data.text.trim());
+            handleSend(data.text.trim());
+          } else {
+            setInputVal("");
+          }
+        } catch {
+          setInputVal("");
+          showToast("Transcription failed. Try again.");
+        }
+      };
 
-    recognitionRef.current = rec;
-    try {
-      rec.start();
+      mediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.start();
       setListening(true);
-    } catch {
-      // Mic not ready yet — retry once after a short delay
-      setTimeout(() => {
-        try { rec.start(); setListening(true); } catch { showToast("Mic unavailable. Try again."); }
-      }, 400);
-    }
+    }).catch((err: unknown) => {
+      wakeJustFiredRef.current = false;
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("not-allowed") || msg.includes("Permission")) showToast("Microphone blocked — allow mic access in browser settings.");
+      else showToast("Could not access microphone.");
+    });
+
   }
   // Keep ref fresh every render so wake effect can call it without stale closure
   toggleMicRef.current = toggleMic;
@@ -564,7 +619,7 @@ export default function Home() {
         <div className="d-avatar-wrap">
           <Image src={donnaImg} alt="Donna" className="d-avatar-img" width={110} height={110} priority />
         </div>
-        <div className="d-name">Donna <span>(AI Assistant)</span></div>
+        <div className="d-name">Donna</div>
       </div>
       <div className="donna-chat">
         <div className="chat-msgs">
@@ -592,6 +647,8 @@ export default function Home() {
                 key={i}
                 msg={msg}
                 onAnswers={handleAnswers}
+                onConfirmDelete={handleConfirmDelete}
+                onCancelDelete={handleCancelDelete}
                 allUpdates={updates}
                 getLatestUpdate={getLatestUpdate}
               />
@@ -663,8 +720,8 @@ export default function Home() {
 
       <div className="main">
         <div className="topbar">
-          <div className="tb-brand"><strong>DONNA</strong><span> — AI Productivity Dashboard</span></div>
-          <div className="tb-center"><strong>PEARSON</strong> <span className="tb-sep">|</span> <strong>SPECTER</strong></div>
+          <div className="tb-brand"><strong>DONNA</strong><span> — Get everything done.</span></div>
+          <div className="tb-center"></div>
           <div className="tb-right-new">
             {wakeActive && (
               <div className="wake-chip">
@@ -678,7 +735,9 @@ export default function Home() {
             {messages.length > 0 && (view === "home" || view === "donna") && (
               <button className="clear-btn" onClick={clearChat} type="button">Clear</button>
             )}
-            <div className="tb-av">...</div>
+            <div className="tb-av">
+              <svg viewBox="0 0 24 24" width={16} height={16} fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+            </div>
           </div>
         </div>
 
@@ -708,32 +767,44 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="cal-grid-wrap">
-                  <div className="cal-grid">
-                    <div className="col-hdr" style={{ borderLeft: "none" }} />
-                    <div className="col-hdr"><div className="col-day">TUE</div><div className="col-num">27</div></div>
-                    <div className="col-hdr"><div className="col-day">WED</div><div className="col-num">28</div></div>
-                    <div className="col-hdr"><div className="col-day">THU</div><div className="col-num">29</div></div>
-                    <div className="week-lbl">Mon 2</div>
-                    <div className="day-cell"><div className="day-n">1</div><div className="cal-event red"><div className="ev-time">10:00 AM – 11:00 AM</div>Meeting with Darby &amp; Co. re: Merger</div></div>
-                    <div className="day-cell"><div className="day-n">2</div><div className="cal-event gray"><div className="ev-time">9:00 AM – 10:00 AM</div>All-Staff Briefing</div></div>
-                    <div className="day-cell"><div className="day-n">3</div></div>
-                    <div className="week-lbl">4</div>
-                    <div className="day-cell"><div className="cal-event blue"><div className="ev-time">1:00 PM – 2:00 PM</div>Client Call: Jessica Pearson</div></div>
-                    <div className="day-cell"><div className="day-n">9</div></div>
-                    <div className="day-cell"><div className="cal-event red"><div className="ev-time">9:30 AM – 11:00 AM</div>Meeting with Merger</div></div>
-                    <div className="week-lbl">13</div>
-                    <div className="day-cell"><div className="cal-event green"><div className="ev-time">3:30 PM – 4:30 PM</div>Legal Research on K-Street Contract</div></div>
-                    <div className="day-cell"><div className="day-n">16</div></div>
-                    <div className="day-cell"><div className="day-n">17</div></div>
-                    <div className="week-lbl">21</div>
-                    <div className="day-cell"><div className="day-n">22</div></div>
-                    <div className="day-cell"><div className="day-n">23</div><div className="cal-event gray"><div className="ev-time">10:00 AM – 12:00 PM</div>Client Call</div></div>
-                    <div className="day-cell"><div className="day-n">24</div></div>
-                    <div className="week-lbl">27</div>
-                    <div className="day-cell"><div className="day-n">29</div></div>
-                    <div className="day-cell"><div className="day-n">30</div></div>
-                    <div className="day-cell"><div className="day-n">1</div></div>
-                  </div>
+                  {homeEventsLoading ? (
+                    <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>Loading your calendar...</div>
+                  ) : homeEvents.length === 0 ? (
+                    <div style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontSize: "13px" }}>No upcoming events. Ask Donna to schedule something.</div>
+                  ) : (
+                    <div style={{ padding: "0 4px" }}>
+                      {Object.entries(
+                        homeEvents.reduce((acc, ev) => {
+                          const d = ev.start.split("T")[0];
+                          if (!acc[d]) acc[d] = [];
+                          acc[d].push(ev);
+                          return acc;
+                        }, {} as Record<string, CalEvent[]>)
+                      ).map(([date, evs]) => {
+                        const dt = new Date(date + "T12:00:00");
+                        const label = dt.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+                        const colors = ["red", "blue", "green", "gray"];
+                        return (
+                          <div key={date}>
+                            <div className="week-lbl" style={{ justifyContent: "flex-start", padding: "6px 8px", fontWeight: 600, fontSize: "11px" }}>{label}</div>
+                            <div className="day-cell" style={{ minHeight: "auto" }}>
+                              {evs.map((ev, i) => {
+                                const t = ev.start.includes("T")
+                                  ? new Date(ev.start).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+                                  : "All day";
+                                return (
+                                  <div key={ev.id} className={`cal-event ${colors[i % colors.length]}`}>
+                                    <div className="ev-time">{t}</div>
+                                    {ev.summary}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
               {donnaPanel(true)}
@@ -900,11 +971,15 @@ export default function Home() {
 function MessageBlock({
   msg,
   onAnswers,
+  onConfirmDelete,
+  onCancelDelete,
   allUpdates,
   getLatestUpdate,
 }: {
   msg: ChatMessage;
   onAnswers: (a: Record<string, string>) => void;
+  onConfirmDelete: (filter: string, originalQuery: string) => void;
+  onCancelDelete: () => void;
   allUpdates: BusinessUpdate[];
   getLatestUpdate: (name: string, updates: BusinessUpdate[]) => BusinessUpdate | undefined;
 }) {
@@ -943,6 +1018,37 @@ function MessageBlock({
         <div className="msg-av"><Image src={donnaImg} alt="Donna" width={28} height={28} className="msg-av-img" /></div>
         <div className="clarify-wrap">
           <ClarifyBlock questions={msg.questions} onSubmit={onAnswers} />
+        </div>
+      </div>
+    );
+  }
+
+  if (msg.type === "confirm_delete") {
+    return (
+      <div className="msg-row donna">
+        <div className="msg-av"><Image src={donnaImg} alt="Donna" width={28} height={28} className="msg-av-img" /></div>
+        <div className="msg-bubble donna-bubble" style={{ maxWidth: "420px" }}>
+          <div style={{ marginBottom: "10px", fontWeight: 600 }}>I&apos;ll delete the following {msg.events.length} event{msg.events.length === 1 ? "" : "s"}:</div>
+          <ul style={{ margin: "0 0 12px 0", padding: "0 0 0 16px", fontSize: "13px", lineHeight: "1.6" }}>
+            {msg.events.map(e => (
+              <li key={e.id}>
+                <strong>{e.summary}</strong>
+                {e.start && <span style={{ opacity: 0.65, marginLeft: "6px" }}>
+                  {new Date(e.start).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                </span>}
+              </li>
+            ))}
+          </ul>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button
+              onClick={() => onConfirmDelete(msg.filter, msg.filter)}
+              style={{ background: "var(--red)", color: "white", border: "none", borderRadius: "6px", padding: "7px 16px", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}
+            >Yes, delete them</button>
+            <button
+              onClick={onCancelDelete}
+              style={{ background: "rgba(255,255,255,0.08)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "6px", padding: "7px 16px", fontWeight: 600, cursor: "pointer", fontSize: "13px" }}
+            >No, keep them</button>
+          </div>
         </div>
       </div>
     );

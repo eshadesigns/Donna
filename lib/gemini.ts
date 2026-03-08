@@ -56,7 +56,9 @@ export interface ParsedIntent {
   noFurtherQuestions?: boolean;  // User explicitly said no more questions
   locationMentioned?: string;    // Explicit location if stated in query
   editFrom?: string;             // For calendar_edit: the current event title to find
-  editTo?: string;               // For calendar_edit: the new title to set
+  editTo?: string;               // For calendar_edit: the new title to set (null if only changing color)
+  editColor?: string;            // For calendar_edit: color name to apply (e.g. "yellow", "red", "blue")
+  deleteFilter?: string;         // For calendar_delete: keyword to filter which events to delete (null = delete all)
 }
 
 export async function parseIntent(
@@ -83,14 +85,19 @@ Return JSON:
   "noFurtherQuestions": boolean,    // true if user says "no further questions", "no questions", "just do it", etc.
   "locationMentioned": string | null, // Location if explicitly stated by user (e.g. "near downtown Austin")
   "editFrom": string | null,        // For calendar_edit: the current event title to search for
-  "editTo": string | null           // For calendar_edit: the new title to replace it with
+  "editTo": string | null,          // For calendar_edit: the new title to replace it with (null if only changing color)
+  "editColor": string | null,       // For calendar_edit: color name if user wants to change event color (e.g. "yellow", "red", "blue", "green", "purple"). null if not a color change.
+  "deleteFilter": string | null     // For calendar_delete: keyword to match event titles (e.g. "hair", "dentist"). null = delete ALL events.
 }
 
 Examples:
 - "hey book me a hair appointment tmrw 8pm no questions add to cal" → intent: business_search, service: hair salon, dateTime: <tomorrow 8pm>, addToCalendar: true, noFurtherQuestions: true
 - "add dentist appt thursday 3pm" → intent: calendar_add, dateTime: <thursday 3pm>
-- "delete all my appointments" / "remove every event" / "clear my calendar" → intent: calendar_delete
-- "change exam to OS exam" / "rename exam to OS exam" / "update my dentist event to dentist cleaning" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam"
+- "delete all my appointments" / "clear my calendar" → intent: calendar_delete, deleteFilter: null
+- "remove all the hair stylist appointments" / "delete my dentist events" → intent: calendar_delete, deleteFilter: "hair" or "dentist" (the keyword to match against event titles)
+- "change exam to OS exam" / "rename exam to OS exam" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam", editColor: null
+- "change the color of nail appointment to yellow" / "make my dentist event red" → intent: calendar_edit, editFrom: "nail", editTo: null, editColor: "yellow"
+- IMPORTANT: color requests must set editColor and leave editTo as null — do NOT put color info in editTo
 - "stop" / "stop calling" / "cancel" / "nevermind" / "abort" → intent: cancel
 - "call again" / "try again" / "retry" / "call them again" / "try calling again" → intent: business_search (these are RETRY requests, NOT cancel)`,
       },
