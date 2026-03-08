@@ -1,7 +1,23 @@
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import type { BusinessResult } from "./tavily";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// OpenAI is kept for Whisper (speech-to-text) — do not remove
+// import OpenAI from "openai";
+
+const genai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+const MODEL = "gemini-2.5-flash";
+
+async function ask(system: string, user: string, json = true): Promise<string> {
+  const result = await genai.models.generateContent({
+    model: MODEL,
+    contents: user,
+    config: {
+      systemInstruction: system,
+      ...(json ? { responseMimeType: "application/json" } : {}),
+    },
+  });
+  return result.text ?? "";
+}
 
 //Types
 
@@ -44,71 +60,62 @@ export interface TranscriptSummary {
 }
 
 // ── Query intent parser ──────────────────────────────────────────────────────
-// Runs first on every raw query. Normalises sloppy/voice input into a clean
-// structured intent so all downstream steps work reliably.
 
 export interface ParsedIntent {
-  enrichedQuery: string;         // Rewritten, clear description of what the user wants
-  intent: "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "cancel" | "other";
-  service?: string;              // e.g. "hair stylist", "Italian restaurant"
-  dateTime?: string;             // ISO 8601 if mentioned
-  addToCalendar?: boolean;       // User wants event added to calendar after booking
-  noFurtherQuestions?: boolean;  // User explicitly said no more questions
-  locationMentioned?: string;    // Explicit location if stated in query
-  editFrom?: string;             // For calendar_edit: the current event title to find
-  editTo?: string;               // For calendar_edit: the new title to set (null if only changing color)
-  editColor?: string;            // For calendar_edit: color name to apply (e.g. "yellow", "red", "blue")
-  deleteFilter?: string;         // For calendar_delete: keyword to filter which events to delete (null = delete all)
+  enrichedQuery: string;
+  intent: "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "calendar_delete_and_add" | "cancel" | "other";
+  service?: string;
+  dateTime?: string;
+  addToCalendar?: boolean;
+  noFurtherQuestions?: boolean;
+  locationMentioned?: string;
+  editFrom?: string;
+  editTo?: string;
+  editColor?: string;
+  deleteFilter?: string;
 }
 
 export async function parseIntent(
   rawQuery: string,
   todayISO: string
 ): Promise<ParsedIntent> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna's intent parser. Today is ${todayISO}.
+  const system = `You are Donna's intent parser. Today is ${todayISO}.
 
-Your job: take a raw user message (possibly messy, from voice transcription) and return a clean structured JSON intent that Donna can act on reliably.
+Take a raw user message (possibly messy, from voice transcription) and return a clean structured JSON intent.
 
 Return JSON:
 {
-  "enrichedQuery": string,          // Rewrite the query as a clear, detailed task description (1-2 sentences). Fix grammar, expand abbreviations, make implicit info explicit.
-  "intent": "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "cancel" | "other",
-  "service": string | null,         // What type of business/service (e.g. "hair salon", "Italian restaurant")
-  "dateTime": string | null,        // ISO 8601 — convert relative times like "tomorrow 8pm" to absolute. Use local time (no UTC offset needed).
-  "addToCalendar": boolean,         // true if user says "add to calendar", "put it on my calendar", etc.
-  "noFurtherQuestions": boolean,    // true if user says "no further questions", "no questions", "just do it", etc.
-  "locationMentioned": string | null, // Location if explicitly stated by user (e.g. "near downtown Austin")
-  "editFrom": string | null,        // For calendar_edit: the current event title to search for
-  "editTo": string | null,          // For calendar_edit: the new title to replace it with (null if only changing color)
-  "editColor": string | null,       // For calendar_edit: color name if user wants to change event color (e.g. "yellow", "red", "blue", "green", "purple"). null if not a color change.
-  "deleteFilter": string | null     // For calendar_delete: keyword to match event titles (e.g. "hair", "dentist"). null = delete ALL events.
+  "enrichedQuery": string,
+  "intent": "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "calendar_delete_and_add" | "cancel" | "other",
+  "service": string | null,
+  "dateTime": string | null,
+  "addToCalendar": boolean,
+  "noFurtherQuestions": boolean,
+  "locationMentioned": string | null,
+  "editFrom": string | null,
+  "editTo": string | null,
+  "editColor": string | null,
+  "deleteFilter": string | null
 }
 
 Examples:
 - "hey book me a hair appointment tmrw 8pm no questions add to cal" → intent: business_search, service: hair salon, dateTime: <tomorrow 8pm>, addToCalendar: true, noFurtherQuestions: true
 - "add dentist appt thursday 3pm" → intent: calendar_add, dateTime: <thursday 3pm>
 - "delete all my appointments" / "clear my calendar" → intent: calendar_delete, deleteFilter: null
-- "remove all the hair stylist appointments" / "delete my dentist events" → intent: calendar_delete, deleteFilter: "hair" or "dentist" (the keyword to match against event titles)
-- "remove the nail appointment for March 8th" / "cancel my gym session tomorrow" / "delete the CEN4722 class" → intent: calendar_delete, deleteFilter: "nail" or "gym" or "CEN4722" (extract the event name/type as the filter keyword, ignore the date)
-- IMPORTANT: for single-event deletions, ALWAYS extract a deleteFilter keyword from the event name/type. NEVER return deleteFilter: null unless the user explicitly wants ALL events deleted.
-- "change exam to OS exam" / "rename exam to OS exam" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam", editColor: null
-- "change the color of nail appointment to yellow" / "make my dentist event red" → intent: calendar_edit, editFrom: "nail", editTo: null, editColor: "yellow"
-- IMPORTANT: color requests must set editColor and leave editTo as null — do NOT put color info in editTo
-- "stop" / "stop calling" / "cancel" / "nevermind" / "abort" → intent: cancel
-- "call again" / "try again" / "retry" / "call them again" / "try calling again" → intent: business_search (these are RETRY requests, NOT cancel)`,
-      },
-      { role: "user", content: rawQuery },
-    ],
-  });
+- "remove all the hair stylist appointments" → intent: calendar_delete, deleteFilter: "hair"
+- "remove the nail appointment for March 8th" → intent: calendar_delete, deleteFilter: "nail"
+- IMPORTANT: for single-event deletions, ALWAYS extract a deleteFilter keyword. NEVER return deleteFilter: null unless user explicitly wants ALL events deleted.
+- "remove my marketing exam and add an accounting exam from 8am to 12pm" → intent: calendar_delete_and_add, deleteFilter: "marketing", dateTime: <8am today or specified date>
+- IMPORTANT: when the user asks to BOTH remove one event AND add another in the same message, use intent: calendar_delete_and_add. Set deleteFilter for what to remove and dateTime for the new event.
+- "change exam to OS exam" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam", editColor: null
+- "change the color of nail appointment to yellow" → intent: calendar_edit, editFrom: "nail", editTo: null, editColor: "yellow"
+- IMPORTANT: color requests must set editColor and leave editTo as null
+- "stop" / "cancel" / "nevermind" → intent: cancel
+- "call again" / "retry" → intent: business_search (RETRY, NOT cancel)`;
 
   try {
-    return JSON.parse(completion.choices[0].message.content ?? "{}") as ParsedIntent;
+    const text = await ask(system, rawQuery);
+    return JSON.parse(text) as ParsedIntent;
   } catch {
     return { enrichedQuery: rawQuery, intent: "other" };
   }
@@ -119,30 +126,17 @@ Examples:
 export async function generateClarifyingQuestions(
   query: string
 ): Promise<ClarifyingQuestion[]> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna, a personal AI assistant. Generate clarifying questions as JSON.
+  const system = `You are Donna, a personal AI assistant. Generate clarifying questions as JSON.
 Return: { "questions": [ { "id": string, "icon": string, "label": string, "question": string, "inputType": "text"|"select"|"location", "options": string[] | undefined } ] }
 Rules:
-- If the user says "no further questions", "no more questions", "no questions", or similar, skip all optional questions — BUT still ask for location if it is missing and the task requires a local search (location is non-negotiable).
-- If the user has already provided all needed information (date, time, location, etc.), return { "questions": [] }.
-- For calendar tasks (add event, create event, schedule, put on calendar): ONLY ask if date/time is missing. Never ask for location or extra details.
-- For local business searches (salons, restaurants, stores, spas, etc.): ALWAYS ask for location if not provided, even if user said "no further questions". Without location, the search cannot run.
-- Maximum 3 questions. Only ask what is truly essential to complete the task.`,
-      },
-      {
-        role: "user",
-        content: `User asked: "${query}"`,
-      },
-    ],
-  });
+- If the user says "no further questions", skip optional questions — but still ask for location if missing and task requires local search.
+- If user already provided all info, return { "questions": [] }.
+- For calendar tasks: ONLY ask if date/time is missing. Never ask for location.
+- For local business searches: ALWAYS ask for location if not provided.
+- Maximum 3 questions.`;
 
-  const raw = completion.choices[0].message.content ?? "{}";
-  const parsed = JSON.parse(raw) as { questions: ClarifyingQuestion[] };
+  const text = await ask(system, `User asked: "${query}"`);
+  const parsed = JSON.parse(text) as { questions: ClarifyingQuestion[] };
   return parsed.questions;
 }
 
@@ -169,60 +163,40 @@ export async function extractCalendarIntent(
   query: string,
   todayISO: string
 ): Promise<CalendarEventExtract> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna's intent classifier. Today's date is ${todayISO}.
+  const system = `You are Donna's intent classifier. Today's date is ${todayISO}.
 Determine if the user wants to add/create/schedule one or more calendar events.
-If yes, extract ALL events mentioned — users often ask to add multiple in one message.
+Extract ALL events mentioned — users often ask to add multiple in one message.
 Return JSON:
 {
   "isCalendarAction": boolean,
   "events": [
     {
       "title": string,
-      "dateTime": string (ISO 8601, infer year/timezone as local — use the exact start time),
-      "durationMinutes": number (compute from start+end times if given, else default 60),
+      "dateTime": string (ISO 8601, infer year/timezone as local),
+      "durationMinutes": number (default 60),
       "location": string | null,
       "description": string | null,
-      "color": string | null  (e.g. "yellow", "red", "blue", "green" — if user specifies a color for this event)
+      "color": string | null
     }
   ]
 }
 If not a calendar action, return { "isCalendarAction": false, "events": [] }.
-IMPORTANT: If the user says "make them all yellow" or specifies one color for all, apply it to every event.`,
-      },
-      { role: "user", content: query },
-    ],
-  });
-  return JSON.parse(completion.choices[0].message.content ?? "{}") as CalendarEventExtract;
+IMPORTANT: If the user specifies one color for all events, apply it to every event.`;
+
+  const text = await ask(system, query);
+  return JSON.parse(text) as CalendarEventExtract;
 }
 
-//Evaluate whether search results are sufficient or Donna needs to call
+//Evaluate whether search results are sufficient
 
 export async function evaluateSearchResults(
   query: string,
   results: BusinessResult[]
 ): Promise<"sufficient" | "insufficient"> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna's decision engine. Return JSON: { "verdict": "sufficient" | "insufficient" }`,
-      },
-      {
-        role: "user",
-        content: `User asked: "${query}"\n\nSearch results:\n${results.map((r, i) => `${i + 1}. ${r.name}: ${r.description}`).join("\n")}\n\nAre these results sufficient to answer the query?`,
-      },
-    ],
-  });
-
-  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}") as { verdict: string };
+  const system = `You are Donna's decision engine. Return JSON: { "verdict": "sufficient" | "insufficient" }`;
+  const user = `User asked: "${query}"\n\nSearch results:\n${results.map((r, i) => `${i + 1}. ${r.name}: ${r.description}`).join("\n")}\n\nAre these results sufficient?`;
+  const text = await ask(system, user);
+  const parsed = JSON.parse(text) as { verdict: string };
   return parsed.verdict as "sufficient" | "insufficient";
 }
 
@@ -239,27 +213,19 @@ export async function scoreAndRankResults(
   if (userProfile?.budget) profileLines.push(`Budget: ${userProfile.budget}`);
   if (userProfile?.notes) profileLines.push(`Additional notes: ${userProfile.notes}`);
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna's scoring engine. Score each business 1–10 on how well it fits the client's request. Return JSON: { "businesses": [ { "name", "address", "phone", "onlineBookingUrl", "description", "url", "score", "reasoning" } ] } ranked best-first.
+  const system = `You are Donna's scoring engine. Score each business 1–10. Return JSON: { "businesses": [ { "name", "address", "phone", "onlineBookingUrl", "description", "url", "score", "reasoning" } ] } ranked best-first.
 
-Scoring rubric (apply all that apply):
-- +3 pts: Service clearly matches what the client needs (e.g. specializes in their hair type, cuisine, etc.)
-- +2 pts: Business has online booking or a phone number to call
-- +2 pts: Appears to be within the client's budget range
-- +1 pt: Has strong reviews or is well-known/reputable
-- +1 pt: Address is close to the client's location
-- -2 pts: Likely outside the client's budget (too expensive or too cheap)
-- -2 pts: Mismatch with specific client needs (e.g. doesn't do curly hair, wrong cuisine)
-- -1 pt: No phone number and no online booking (hard to reach)`,
-      },
-      {
-        role: "user",
-        content: `Client request: "${query}"
+Scoring rubric:
+- +3 pts: Service clearly matches client needs
+- +2 pts: Has online booking or phone number
+- +2 pts: Within client's budget
+- +1 pt: Strong reviews or reputable
+- +1 pt: Close to client's location
+- -2 pts: Outside budget
+- -2 pts: Mismatch with client needs
+- -1 pt: No phone and no online booking`;
+
+  const user = `Client request: "${query}"
 
 Timing: ${prefs.timeWindow || "flexible"}
 Location: ${prefs.location || "unspecified"}
@@ -271,13 +237,10 @@ ${results.map((r, i) => `${i + 1}. ${r.name}
    Address: ${r.address}
    Phone: ${r.phone || "none"}
    Online booking: ${r.onlineBookingUrl || "none"}
-   Description: ${r.description}`).join("\n\n")}`,
-      },
-    ],
-  });
+   Description: ${r.description}`).join("\n\n")}`;
 
-  const parsed = JSON.parse(completion.choices[0].message.content ?? "{}") as { businesses: RankedBusiness[] };
-  //Normalize "none"/"unknown"/empty strings to null, sort best-first
+  const text = await ask(system, user);
+  const parsed = JSON.parse(text) as { businesses: RankedBusiness[] };
   return parsed.businesses
     .map((b) => ({
       ...b,
@@ -287,51 +250,49 @@ ${results.map((r, i) => `${i + 1}. ${r.name}
     .sort((a, b) => b.score - a.score);
 }
 
-// Donna's spoken summary after a call — sharp, factual, first-person
+// Donna's spoken summary after a call
 export async function summarizeCallForDonna(
   transcript: string,
   businessName: string
 ): Promise<string> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna, a sharp executive AI assistant. Summarize this call in 1–2 sentences in first person, like you made the call yourself.
+  const system = `You are Donna, a sharp executive AI assistant. Summarize this call in 1–2 sentences in first person.
 
 Rules:
-- ALWAYS state the outcome first: booked, unavailable, no answer, or unclear.
-- If booked: include the specific date/time and price. Example: "Booked. Thursday at 2pm, $85."
-- If unavailable: say why if known. Example: "No availability Thursday — they're fully booked."
-- If no answer / voicemail: "No answer at ${businessName}. I'll try again or move to the next option."
-- Keep it under 30 words. No filler. No "I called and..." preamble — get straight to the result.`,
-      },
-      {
-        role: "user",
-        content: `Business: ${businessName}\nTranscript:\n${transcript}`,
-      },
-    ],
-  });
-  return completion.choices[0].message.content?.trim() ?? `I called ${businessName} — check the transcript for details.`;
+- State the outcome first: booked, unavailable, no answer, or unclear.
+- If booked: include specific date/time and price. Example: "Booked. Thursday at 2pm, $85."
+- If no answer: "No answer at ${businessName}. I'll try again or move to the next option."
+- Under 30 words. No filler.`;
+
+  const text = await ask(system, `Business: ${businessName}\nTranscript:\n${transcript}`, false);
+  return text.trim() || `I called ${businessName} — check the transcript for details.`;
 }
 
 // Donna's in-character reply to casual/conversational messages
 export async function generateDonnaReply(rawQuery: string): Promise<string> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna — a sharp, witty AI executive assistant. Think of the character Donna from Suits: composed, confident, and two steps ahead. You handle anything from booking restaurants to scheduling meetings to calling businesses on the client's behalf.
+  const system = `You are Donna — a sharp, witty AI executive assistant. Think of the character Donna from Suits: composed, confident, two steps ahead.
 
-When the client makes small talk, chats, or asks how you're doing, respond in character — brief, warm, and a little dry. Keep it 1-2 sentences max. Then gently redirect toward what you can actually do for them.
+Respond in character — brief, warm, a little dry. 1-2 sentences max. Gently redirect toward what you can do for them. Never be robotic.`;
 
-Never be robotic or formal. You're Donna, not a chatbot.`,
-      },
-      { role: "user", content: rawQuery },
-    ],
-  });
-  return completion.choices[0].message.content?.trim() ?? "On it. What do you need?";
+  const text = await ask(system, rawQuery, false);
+  return text.trim() || "On it. What do you need?";
+}
+
+// Clean up raw user input into professional call context
+export async function cleanCallContext(raw: {
+  timeWindow?: string;
+  task?: string;
+}): Promise<{ timeWindow?: string; task?: string }> {
+  const system = `You are Donna's call prep assistant. The user spoke casually. Convert their input into clean, professional phrasing suitable for a business phone call. Return JSON: { "timeWindow": string | null, "task": string | null }. Be concise. No filler. Example: "like anytime friday between 1 and 7 ish pm" → "Friday between 1pm and 7pm". Only include fields that were provided.`;
+  try {
+    const text = await ask(system, JSON.stringify(raw));
+    const parsed = JSON.parse(text) as { timeWindow?: string; task?: string };
+    return {
+      timeWindow: parsed.timeWindow ?? raw.timeWindow,
+      task: parsed.task ?? raw.task,
+    };
+  } catch {
+    return raw;
+  }
 }
 
 //Summarize a Vapi call transcript and extract booking result
@@ -340,20 +301,7 @@ export async function summarizeTranscript(
   transcript: string,
   originalQuery: string
 ): Promise<TranscriptSummary> {
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are Donna's transcript analyzer. Extract booking outcome from the call. Return JSON: { "booked": boolean, "bookingTime": string|undefined, "bookingPrice": string|undefined, "stylistName": string|undefined, "notes": string, "nextAction": "confirm"|"move_to_next"|"retry" }`,
-      },
-      {
-        role: "user",
-        content: `Booking task: "${originalQuery}"\n\nTranscript:\n${transcript}`,
-      },
-    ],
-  });
-
-  return JSON.parse(completion.choices[0].message.content ?? "{}") as TranscriptSummary;
+  const system = `You are Donna's transcript analyzer. Extract booking outcome. Return JSON: { "booked": boolean, "bookingTime": string|undefined, "bookingPrice": string|undefined, "stylistName": string|undefined, "notes": string, "nextAction": "confirm"|"move_to_next"|"retry" }`;
+  const text = await ask(system, `Booking task: "${originalQuery}"\n\nTranscript:\n${transcript}`);
+  return JSON.parse(text) as TranscriptSummary;
 }

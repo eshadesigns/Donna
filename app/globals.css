@@ -40,12 +40,12 @@
 html, body {
   height: 100%;
   overflow: hidden;
-  font-family: 'LibelSuit', sans-serif;
+  font-family: 'Inter', sans-serif;
   background: #06080f;
   color: var(--text);
-  font-size: 14px;
-  letter-spacing: 0.12em;
-  line-height: 1.6;
+  font-size: 13.5px;
+  letter-spacing: 0.02em;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -477,15 +477,15 @@ html, body {
 }
 
 .user-bubble {
-  background: rgba(184,50,50,0.12);
-  border: 1px solid rgba(184,50,50,0.2);
+  background: #3a1010;
+  border: 1px solid rgba(184,50,50,0.3);
   color: var(--text);
   border-radius: 10px 3px 10px 10px;
 }
 
 .donna-bubble {
-  background: #1a2d48;
-  border: 1px solid rgba(255,255,255,0.08);
+  background: #131c30;
+  border: 1px solid rgba(255,255,255,0.1);
   color: var(--text);
   border-radius: 3px 10px 10px 10px;
 }
@@ -911,8 +911,8 @@ html, body {
 
 .biz-card {
   padding: 10px 12px;
-  background: var(--navy-light);
-  border: 1px solid var(--border);
+  background: #131c30;
+  border: 1px solid rgba(255,255,255,0.1);
   border-radius: 8px;
   transition: border-color 0.15s;
 }

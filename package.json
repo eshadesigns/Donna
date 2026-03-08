@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@elevenlabs/elevenlabs-js": "^2.38.1",
+    "@google/genai": "^1.44.0",
     "@google/generative-ai": "^0.24.1",
     "@tavily/core": "^0.7.2",
     "elevenlabs": "^1.59.0",

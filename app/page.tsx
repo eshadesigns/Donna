@@ -266,6 +266,28 @@ export default function Home() {
         body: JSON.stringify({ query: q, userProfile: profile }),
       });
 
+      // If the route returned SSE (it had enough info to go straight to search), handle it inline
+      if (res.headers.get("Content-Type")?.includes("text/event-stream")) {
+        if (!res.body) throw new Error("No stream");
+        setPhase("working");
+        const reader = res.body.getReader();
+        readerRef.current = reader;
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try { handleSSEEvent(JSON.parse(line.slice(6))); } catch {}
+          }
+        }
+        return;
+      }
+
       const data = await res.json() as { questions?: ClarifyingQuestion[]; error?: string; done?: boolean; message?: string; confirmDelete?: { filter: string; events: Array<{ id: string; summary: string; start: string }> } };
 
       if (data.error) {
@@ -651,6 +673,7 @@ export default function Home() {
                 onCancelDelete={handleCancelDelete}
                 allUpdates={updates}
                 getLatestUpdate={getLatestUpdate}
+                callRecords={callRecords}
               />
             ))
           )}
@@ -975,6 +998,7 @@ function MessageBlock({
   onCancelDelete,
   allUpdates,
   getLatestUpdate,
+  callRecords,
 }: {
   msg: ChatMessage;
   onAnswers: (a: Record<string, string>) => void;
@@ -982,6 +1006,7 @@ function MessageBlock({
   onCancelDelete: () => void;
   allUpdates: BusinessUpdate[];
   getLatestUpdate: (name: string, updates: BusinessUpdate[]) => BusinessUpdate | undefined;
+  callRecords: CallRecord[];
 }) {
   if (msg.type === "user") {
     return (
@@ -1059,7 +1084,7 @@ function MessageBlock({
       <div className="msg-row donna full-width">
         <div className="msg-av"><Image src={donnaImg} alt="Donna" width={28} height={28} className="msg-av-img" /></div>
         <div className="biz-list">
-          <BizList businesses={msg.businesses} allUpdates={allUpdates} getLatestUpdate={getLatestUpdate} />
+          <BizList businesses={msg.businesses} allUpdates={allUpdates} getLatestUpdate={getLatestUpdate} callRecords={callRecords} />
         </div>
       </div>
     );
@@ -1118,18 +1143,26 @@ const badgeLabel: Record<string, string> = {
   queued: "Calling tomorrow", failed: "Couldn't reach", skipped: "No phone",
 };
 
-function BizList({ businesses, allUpdates, getLatestUpdate }: {
+function BizList({ businesses, allUpdates, getLatestUpdate, callRecords }: {
   businesses: RankedBusiness[];
   allUpdates: BusinessUpdate[];
   getLatestUpdate: (n: string, u: BusinessUpdate[]) => BusinessUpdate | undefined;
+  callRecords: CallRecord[];
 }) {
+  const [expandedName, setExpandedName] = useState<string | null>(null);
   return (
     <>
       {businesses.map((b, i) => {
         const update = getLatestUpdate(b.name, allUpdates);
         const isActive = update?.status === "calling" || update?.status === "call_initiated";
+        const rec = callRecords.find(r => r.businessName === b.name);
+        const hasTranscript = !!rec?.transcript;
+        const expanded = expandedName === b.name;
         return (
-          <div key={`${b.name}-${i}`} className={`biz-card${isActive ? " active" : ""}`}>
+          <div key={`${b.name}-${i}`} className={`biz-card${isActive ? " active" : ""}`}
+            style={{ cursor: hasTranscript ? "pointer" : "default" }}
+            onClick={() => hasTranscript && setExpandedName(expanded ? null : b.name)}
+          >
             <div className="biz-row">
               <span className="biz-rank">#{i + 1}</span>
               <span className="biz-name">{b.name}</span>
@@ -1137,12 +1170,19 @@ function BizList({ businesses, allUpdates, getLatestUpdate }: {
               {update && badgeClass[update.status] && (
                 <span className={`biz-badge ${badgeClass[update.status]}`}>{badgeLabel[update.status]}</span>
               )}
+              {hasTranscript && <span style={{ fontSize: "10px", color: "var(--text-muted)", marginLeft: "auto" }}>{expanded ? "▾ hide" : "▸ transcript"}</span>}
             </div>
             <div className="biz-address">{b.address}</div>
             <div className="biz-reason">{b.reasoning}</div>
             {update && <div className="biz-detail">{update.detail}</div>}
             {update?.status === "booked_online" && update.url && (
               <a href={update.url} target="_blank" rel="noopener noreferrer" className="biz-link">Book now →</a>
+            )}
+            {expanded && rec?.transcript && (
+              <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: "1px solid var(--border)", fontSize: "11.5px", color: "var(--text-dim)", lineHeight: "1.6", whiteSpace: "pre-wrap" }}>
+                {rec.summary && <div style={{ marginBottom: "8px", color: "var(--text)", fontWeight: 600 }}>{rec.summary}</div>}
+                <div style={{ opacity: 0.7 }}>{rec.transcript}</div>
+              </div>
             )}
           </div>
         );

@@ -1,10 +1,9 @@
 import { NextRequest } from "next/server";
-import { parseIntent, scoreAndRankResults, extractCalendarIntent, generateDonnaReply } from "@/lib/gemini";
+import { parseIntent, scoreAndRankResults, extractCalendarIntent, generateDonnaReply, summarizeCallForDonna, cleanCallContext } from "@/lib/gemini";
 import { searchNearby } from "@/lib/tavily";
 import { triggerCall, pollCallResult } from "@/lib/vapi";
 import { addToQueue, updateQueueItemStatus } from "@/lib/mongo";
-import { summarizeCallForDonna } from "@/lib/gemini";
-import { createEvent, getEvents, getFreeBlocks, deleteAllEvents, updateEvent } from "@/lib/calendar";
+import { createEvent, getEvents, getFreeBlocks, deleteAllEvents, deleteEvent, updateEvent } from "@/lib/calendar";
 import type { UserPrefs } from "@/lib/gemini";
 
 //SSE helper
@@ -98,6 +97,51 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  if (intent.intent === "calendar_delete_and_add") {
+    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+    if (!refreshToken) {
+      return Response.json({ done: true, message: "Calendar not connected — set GOOGLE_REFRESH_TOKEN to enable calendar access." });
+    }
+    const filter = intent.deleteFilter;
+    const results: string[] = [];
+    try {
+      // Step 1: delete
+      if (filter) {
+        const timeMin = new Date().toISOString();
+        const timeMax = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+        const events = await getEvents(refreshToken, timeMin, timeMax);
+        const matching = events.filter(e => e.summary?.toLowerCase().includes(filter.toLowerCase()));
+        for (const ev of matching) {
+          await deleteEvent(ev.id, refreshToken);
+        }
+        results.push(matching.length > 0 ? `Removed ${matching.length} "${filter}" event${matching.length === 1 ? "" : "s"}.` : `No "${filter}" events found.`);
+      }
+      // Step 2: add new event
+      const calIntent = await extractCalendarIntent(rawQuery, todayISO);
+      const eventsToCreate = calIntent.isCalendarAction
+        ? (calIntent.events && calIntent.events.length > 0 ? calIntent.events : [])
+        : [];
+      for (const ev of eventsToCreate) {
+        await createEvent({
+          businessName: ev.title ?? "Event",
+          dateTime: ev.dateTime,
+          durationMinutes: ev.durationMinutes ?? 60,
+          address: ev.location ?? undefined,
+          summary: ev.description ?? undefined,
+          color: ev.color ?? undefined,
+        }, refreshToken);
+      }
+      if (eventsToCreate.length > 0) {
+        const names = eventsToCreate.map(e => `"${e.title}"`).join(" and ");
+        results.push(`Added ${names} to your calendar.`);
+      }
+      return Response.json({ done: true, message: results.join(" ") || "Done." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Calendar error";
+      return Response.json({ error: `Couldn't update calendar: ${msg}` }, { status: 500 });
+    }
+  }
+
   if (intent.intent === "calendar_delete") {
     const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
     if (!refreshToken) {
@@ -125,11 +169,11 @@ export async function POST(req: NextRequest) {
 
   const isCalendarIntent = intent.intent === "calendar_add" || intent.addToCalendar === true;
 
-  // Legacy keyword fallback (belt-and-suspenders)
+  // Legacy keyword fallback — only applies when Gemini didn't already classify as business_search
   const lq = query.toLowerCase();
-  const calendarVerbs = ["add to calendar","add event","create event","schedule event","put on calendar","add to my calendar","add it to my calendar","add an event","add a","book a","book an","schedule a","set up a","set a","put a"];
+  const calendarVerbs = ["add to calendar","add event","create event","schedule event","put on calendar","add to my calendar","add it to my calendar","add an event","add a","schedule a","set up a","set a","put a"];
   const calendarNouns = ["appointment","event","meeting","reminder","session","slot","booking"];
-  const isCalendarKeyword = isCalendarIntent || (calendarVerbs.some(kw => lq.includes(kw)) && calendarNouns.some(kw => lq.includes(kw)));
+  const isCalendarKeyword = intent.intent !== "business_search" && (isCalendarIntent || (calendarVerbs.some(kw => lq.includes(kw)) && calendarNouns.some(kw => lq.includes(kw))));
 
   //Step A — calendar intent + clarifying question, only on first call (no prefs yet)
   //If prefs already provided, user answered the question — skip straight to pipeline
@@ -290,11 +334,12 @@ export async function POST(req: NextRequest) {
                 userProfile?.hairType,
                 userProfile?.notes,
               ].filter(Boolean);
+              const cleanCtx = await cleanCallContext({ timeWindow: activePrefs.timeWindow, task: query });
               const { callId } = await triggerCall(phoneToCall, {
-                task: query,
+                task: cleanCtx.task ?? query,
                 service: intent.service,
                 clientNotes: clientNotesParts.length > 0 ? clientNotesParts.join(". ") : undefined,
-                timeWindow: activePrefs.timeWindow,
+                timeWindow: cleanCtx.timeWindow,
                 budget: userProfile?.budget || activePrefs.budget,
                 businessName: name,
               });
