@@ -41,8 +41,8 @@ export async function triggerCall(
       assistant: {
         firstMessage: `Hi, I'm Donna, an AI assistant calling on behalf of a customer. This call may be logged for accuracy. I'm reaching out about ${context.task} — do you have a moment?`,
         model: {
-          provider: "google",
-          model: "gemini-2.0-flash",
+          provider: "openai",
+          model: "gpt-4o-mini",
           systemPrompt,
         },
         voice: {
