@@ -69,6 +69,8 @@ export async function createEvent(
     "Booked by Donna.",
   ].filter(Boolean);
 
+  const colorId = booking.color ? COLOR_MAP[booking.color.toLowerCase().replace(/\s/g, "")] : undefined;
+
   const event = await calendar.events.insert({
     calendarId: "primary",
     requestBody: {
@@ -77,6 +79,7 @@ export async function createEvent(
       description: descriptionParts.join("\n"),
       start: { dateTime: start.toISOString() },
       end: { dateTime: end.toISOString() },
+      ...(colorId ? { colorId } : {}),
     },
   });
 

@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: 'Komikax';
+  src: url('/fonts/KOMIKAX_.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'LibelSuit';
+  src: url('/fonts/LibelSuitRg.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+}
+
 :root {
   --navy: #141d2e;
   --navy-deep: #0b0f1a;
@@ -26,14 +40,33 @@
 html, body {
   height: 100%;
   overflow: hidden;
-  font-family: 'Inter', sans-serif;
+  font-family: 'LibelSuit', sans-serif;
   background: #06080f;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 14px;
+  letter-spacing: 0.12em;
+  line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection { background: var(--red); color: #fff; }
+
+/* ── Texture overlay on all panels (pseudo-element so opacity works on dark bg) ── */
+.donna-panel, .sidebar, .topbar, .full-view, .donna-hero {
+  position: relative;
+}
+
+.sidebar::before, .topbar::before,
+.full-view::before, .donna-hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url('/images/checkered-light-emboss.png') repeat;
+  opacity: 0.3;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: inherit;
+}
 
 /* ── Layout ── */
 .app { display: flex; height: 100vh; }
@@ -173,7 +206,7 @@ html, body {
 /* ── Calendar panel (static grid, home view) ── */
 .cal-panel {
   flex: 1;
-  background: #0e1628;
+  background: #07080d;
   border-radius: 10px;
   border: 1px solid rgba(255,255,255,0.08);
   box-shadow: 0 4px 28px rgba(0,0,0,0.55);
@@ -320,7 +353,7 @@ html, body {
 .donna-panel {
   width: 420px;
   min-width: 360px;
-  background: #0c1422;
+  background: #07080d;
   border-radius: 10px;
   border: 1px solid rgba(255,255,255,0.08);
   box-shadow: 0 4px 28px rgba(0,0,0,0.55);
@@ -345,7 +378,7 @@ html, body {
 }
 
 .donna-hero {
-  background: linear-gradient(160deg, #280e0e 0%, #160a22 35%, #0d1830 70%, #0a1422 100%);
+  background: #07080d;
   padding: 32px 20px 20px;
   display: flex;
   flex-direction: column;
@@ -391,7 +424,7 @@ html, body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: #0c1626;
+  background: #07080d;
 }
 
 .chat-msgs {
@@ -495,7 +528,7 @@ html, body {
 .chat-input-wrap {
   padding: 10px 14px 14px;
   border-top: 1px solid rgba(255,255,255,0.07);
-  background: #0c1626;
+  background: #07080d;
   flex-shrink: 0;
 }
 

@@ -139,21 +139,36 @@ export async function POST(req: NextRequest) {
         ? await extractCalendarIntent(query, todayISO)
         : { isCalendarAction: false as const };
 
-      if (calIntent.isCalendarAction && calIntent.dateTime) {
-        //Have enough info — create the event directly
+      // Support both new multi-event array and legacy single-event fields
+      const eventsToCreate = calIntent.isCalendarAction
+        ? (calIntent.events && calIntent.events.length > 0
+            ? calIntent.events
+            : calIntent.dateTime
+              ? [{ title: calIntent.title ?? "Event", dateTime: calIntent.dateTime, durationMinutes: calIntent.durationMinutes, location: calIntent.location, description: calIntent.description, color: undefined }]
+              : [])
+        : [];
+
+      if (eventsToCreate.length > 0) {
         const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
         if (!refreshToken) {
           return Response.json({ done: true, message: "Calendar not connected — set GOOGLE_REFRESH_TOKEN to enable calendar events." });
         }
         try {
-          await createEvent({
-            businessName: calIntent.title ?? "Event",
-            dateTime: calIntent.dateTime,
-            durationMinutes: calIntent.durationMinutes ?? 60,
-            address: calIntent.location ?? undefined,
-            summary: calIntent.description ?? undefined,
-          }, refreshToken);
-          return Response.json({ done: true, message: `Done! "${calIntent.title}" added to your calendar.` });
+          for (const ev of eventsToCreate) {
+            await createEvent({
+              businessName: ev.title ?? "Event",
+              dateTime: ev.dateTime,
+              durationMinutes: ev.durationMinutes ?? 60,
+              address: ev.location ?? undefined,
+              summary: ev.description ?? undefined,
+              color: ev.color ?? undefined,
+            }, refreshToken);
+          }
+          const names = eventsToCreate.map(e => `"${e.title}"`).join(" and ");
+          const msg = eventsToCreate.length === 1
+            ? `Done! ${names} added to your calendar.`
+            : `Done! Added ${eventsToCreate.length} events: ${names}.`;
+          return Response.json({ done: true, message: msg });
         } catch (err) {
           const msg = err instanceof Error ? err.message : "Calendar error";
           return Response.json({ error: `Couldn't add to calendar: ${msg}` }, { status: 500 });
@@ -327,7 +342,7 @@ export async function POST(req: NextRequest) {
             try {
               await addToQueue({
                 businessName: name,
-                phone: business.phone,
+                phone: business.phone ?? "",
                 scheduledTime: tomorrow9am,
                 userId,
                 context: {

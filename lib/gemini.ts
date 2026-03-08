@@ -95,6 +95,8 @@ Examples:
 - "add dentist appt thursday 3pm" → intent: calendar_add, dateTime: <thursday 3pm>
 - "delete all my appointments" / "clear my calendar" → intent: calendar_delete, deleteFilter: null
 - "remove all the hair stylist appointments" / "delete my dentist events" → intent: calendar_delete, deleteFilter: "hair" or "dentist" (the keyword to match against event titles)
+- "remove the nail appointment for March 8th" / "cancel my gym session tomorrow" / "delete the CEN4722 class" → intent: calendar_delete, deleteFilter: "nail" or "gym" or "CEN4722" (extract the event name/type as the filter keyword, ignore the date)
+- IMPORTANT: for single-event deletions, ALWAYS extract a deleteFilter keyword from the event name/type. NEVER return deleteFilter: null unless the user explicitly wants ALL events deleted.
 - "change exam to OS exam" / "rename exam to OS exam" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam", editColor: null
 - "change the color of nail appointment to yellow" / "make my dentist event red" → intent: calendar_edit, editFrom: "nail", editTo: null, editColor: "yellow"
 - IMPORTANT: color requests must set editColor and leave editTo as null — do NOT put color info in editTo
@@ -147,8 +149,17 @@ Rules:
 //Detect if the query is a calendar action and extract event details
 export interface CalendarEventExtract {
   isCalendarAction: boolean;
+  events?: Array<{
+    title: string;
+    dateTime: string;
+    durationMinutes?: number;
+    location?: string;
+    description?: string;
+    color?: string;
+  }>;
+  // legacy single-event fields (kept for backward compat)
   title?: string;
-  dateTime?: string; // ISO string, relative to today if needed
+  dateTime?: string;
   durationMinutes?: number;
   location?: string;
   description?: string;
@@ -165,10 +176,24 @@ export async function extractCalendarIntent(
       {
         role: "system",
         content: `You are Donna's intent classifier. Today's date is ${todayISO}.
-Determine if the user wants to add/create/schedule a calendar event.
-If yes, extract the event details.
-Return JSON: { "isCalendarAction": boolean, "title": string, "dateTime": string (ISO 8601, infer year/timezone as local), "durationMinutes": number (default 60), "location": string|null, "description": string|null }
-If not a calendar action, return { "isCalendarAction": false }.`,
+Determine if the user wants to add/create/schedule one or more calendar events.
+If yes, extract ALL events mentioned — users often ask to add multiple in one message.
+Return JSON:
+{
+  "isCalendarAction": boolean,
+  "events": [
+    {
+      "title": string,
+      "dateTime": string (ISO 8601, infer year/timezone as local — use the exact start time),
+      "durationMinutes": number (compute from start+end times if given, else default 60),
+      "location": string | null,
+      "description": string | null,
+      "color": string | null  (e.g. "yellow", "red", "blue", "green" — if user specifies a color for this event)
+    }
+  ]
+}
+If not a calendar action, return { "isCalendarAction": false, "events": [] }.
+IMPORTANT: If the user says "make them all yellow" or specifies one color for all, apply it to every event.`,
       },
       { role: "user", content: query },
     ],
