@@ -1,8 +1,9 @@
 import { NextRequest } from "next/server";
-import { generateClarifyingQuestions, scoreAndRankResults } from "@/lib/gemini";
+import { parseIntent, generateClarifyingQuestions, scoreAndRankResults, extractCalendarIntent } from "@/lib/gemini";
 import { searchNearby } from "@/lib/tavily";
 import { triggerCall } from "@/lib/vapi";
 import { addToQueue, updateQueueItemStatus } from "@/lib/mongo";
+import { createEvent, getEvents, getFreeBlocks, deleteAllEvents } from "@/lib/calendar";
 import type { UserPrefs } from "@/lib/gemini";
 
 //SSE helper
@@ -30,12 +31,80 @@ export async function POST(req: NextRequest) {
     userId?: string;
   };
 
-  const { query, prefs, userId = "default" } = body;
+  const { query: rawQuery, prefs, userId = "default" } = body;
 
-  //Step A — no location yet, ask clarifying questions first
-  if (!prefs || !prefs.location) {
-    const questions = await generateClarifyingQuestions(query);
-    return Response.json({ questions });
+  // ── Step 0: Parse & enrich the raw query ───────────────────────────────────
+  const todayISO = new Date().toISOString();
+  const intent = await parseIntent(rawQuery, todayISO);
+
+  // Use the enriched query for all downstream steps
+  const query = intent.enrichedQuery || rawQuery;
+
+  if (intent.intent === "cancel") {
+    return Response.json({ done: true, message: "Got it — I've stopped. No more calls will be made." });
+  }
+
+  if (intent.intent === "calendar_delete") {
+    const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+    if (!refreshToken) {
+      return Response.json({ done: true, message: "Calendar not connected — set GOOGLE_REFRESH_TOKEN to enable calendar access." });
+    }
+    try {
+      const count = await deleteAllEvents(refreshToken);
+      return Response.json({ done: true, message: count > 0 ? `Done! Deleted ${count} event${count === 1 ? "" : "s"} from your calendar.` : "Your calendar is already empty." });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Calendar error";
+      return Response.json({ error: `Couldn't delete events: ${msg}` }, { status: 500 });
+    }
+  }
+
+  const isCalendarIntent = intent.intent === "calendar_add" || intent.addToCalendar === true;
+
+  // Legacy keyword fallback (belt-and-suspenders)
+  const lq = query.toLowerCase();
+  const calendarVerbs = ["add to calendar","add event","create event","schedule event","put on calendar","add to my calendar","add it to my calendar","add an event","add a","book a","book an","schedule a","set up a","set a","put a"];
+  const calendarNouns = ["appointment","event","meeting","reminder","session","slot","booking"];
+  const isCalendarKeyword = isCalendarIntent || (calendarVerbs.some(kw => lq.includes(kw)) && calendarNouns.some(kw => lq.includes(kw)));
+
+  //Step A — check for calendar intent first, then ask clarifying questions if needed
+  if (isCalendarKeyword || !prefs || !prefs.location) {
+    try {
+      const calIntent = isCalendarKeyword
+        ? await extractCalendarIntent(query, todayISO)
+        : { isCalendarAction: false };
+
+      if (calIntent.isCalendarAction && calIntent.dateTime) {
+        //Have enough info — create the event directly
+        const refreshToken = process.env.GOOGLE_REFRESH_TOKEN;
+        if (!refreshToken) {
+          return Response.json({ done: true, message: "Calendar not connected — set GOOGLE_REFRESH_TOKEN to enable calendar events." });
+        }
+        try {
+          await createEvent({
+            businessName: calIntent.title ?? "Event",
+            dateTime: calIntent.dateTime,
+            durationMinutes: calIntent.durationMinutes ?? 60,
+            address: calIntent.location ?? undefined,
+            summary: calIntent.description ?? undefined,
+          }, refreshToken);
+          return Response.json({ done: true, message: `Done! "${calIntent.title}" added to your calendar.` });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "Calendar error";
+          return Response.json({ error: `Couldn't add to calendar: ${msg}` }, { status: 500 });
+        }
+      }
+
+      if (!isCalendarKeyword) {
+        const questions = await generateClarifyingQuestions(query);
+        return Response.json({ questions });
+      }
+
+      // Calendar keyword but AI couldn't extract date/time — ask for it
+      return Response.json({ questions: [{ id: "datetime", icon: "📅", label: "Date & Time", question: "What date and time should I add this event?", inputType: "text" }] });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Error";
+      return Response.json({ error: msg }, { status: 500 });
+    }
   }
 
   //Step B — we have what we need, run the pipeline
@@ -47,6 +116,26 @@ export async function POST(req: NextRequest) {
       };
 
       try {
+        //Auto-detect availability from calendar if no timeWindow given
+        if (!prefs.timeWindow && process.env.GOOGLE_REFRESH_TOKEN) {
+          try {
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const dateStr = tomorrow.toISOString().split("T")[0];
+            const dayStart = new Date(`${dateStr}T08:00:00`);
+            const dayEnd = new Date(`${dateStr}T22:00:00`);
+            const calEvents = await getEvents(process.env.GOOGLE_REFRESH_TOKEN, dayStart.toISOString(), dayEnd.toISOString());
+            const freeBlocks = getFreeBlocks(calEvents, dayStart, dayEnd, 60);
+            // Prefer evening block (7pm+), fall back to any free block
+            const pick = freeBlocks.find(b => new Date(b.start).getHours() >= 19) ?? freeBlocks[0];
+            if (pick) {
+              const fmt = (iso: string) => new Date(iso).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+              prefs.timeWindow = `${fmt(pick.start)}–${fmt(pick.end)}`;
+              send("status", { message: `Donna checked your calendar — you're free ${prefs.timeWindow}.` });
+            }
+          } catch { /* calendar unavailable, proceed without */ }
+        }
+
         //Search
         send("status", { message: "Donna's scanning the web..." });
         const raw = await searchNearby(query, prefs.location!, prefs.radius || "10 miles");
@@ -97,15 +186,17 @@ export async function POST(req: NextRequest) {
               detail: `Donna's on the phone with ${name}...`,
             });
 
+            //Use demo number if set, otherwise call the real business
+            const phoneToCall = process.env.DEMO_PHONE_NUMBER || business.phone;
             try {
-              const { callId } = await triggerCall(business.phone, {
+              const { callId } = await triggerCall(phoneToCall, {
                 task: query,
                 timeWindow: prefs.timeWindow,
                 budget: prefs.budget,
                 businessName: name,
               });
 
-              await updateQueueItemStatus(name, "in-progress", callId);
+              try { await updateQueueItemStatus(name, "in-progress", callId); } catch {}
 
               send("business_update", {
                 name,
@@ -126,17 +217,19 @@ export async function POST(req: NextRequest) {
             tomorrow9am.setDate(tomorrow9am.getDate() + 1);
             tomorrow9am.setHours(9, 0, 0, 0);
 
-            await addToQueue({
-              businessName: name,
-              phone: business.phone,
-              scheduledTime: tomorrow9am,
-              userId,
-              context: {
-                task: query,
-                timeWindow: prefs.timeWindow,
-                budget: prefs.budget,
-              },
-            });
+            try {
+              await addToQueue({
+                businessName: name,
+                phone: business.phone,
+                scheduledTime: tomorrow9am,
+                userId,
+                context: {
+                  task: query,
+                  timeWindow: prefs.timeWindow,
+                  budget: prefs.budget,
+                },
+              });
+            } catch {}
 
             send("business_update", {
               name,
