@@ -49,12 +49,14 @@ export interface TranscriptSummary {
 
 export interface ParsedIntent {
   enrichedQuery: string;         // Rewritten, clear description of what the user wants
-  intent: "business_search" | "calendar_add" | "calendar_delete" | "cancel" | "other";
+  intent: "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "cancel" | "other";
   service?: string;              // e.g. "hair stylist", "Italian restaurant"
   dateTime?: string;             // ISO 8601 if mentioned
   addToCalendar?: boolean;       // User wants event added to calendar after booking
   noFurtherQuestions?: boolean;  // User explicitly said no more questions
   locationMentioned?: string;    // Explicit location if stated in query
+  editFrom?: string;             // For calendar_edit: the current event title to find
+  editTo?: string;               // For calendar_edit: the new title to set
 }
 
 export async function parseIntent(
@@ -74,19 +76,23 @@ Your job: take a raw user message (possibly messy, from voice transcription) and
 Return JSON:
 {
   "enrichedQuery": string,          // Rewrite the query as a clear, detailed task description (1-2 sentences). Fix grammar, expand abbreviations, make implicit info explicit.
-  "intent": "business_search" | "calendar_add" | "calendar_delete" | "cancel" | "other",
+  "intent": "business_search" | "calendar_add" | "calendar_delete" | "calendar_edit" | "cancel" | "other",
   "service": string | null,         // What type of business/service (e.g. "hair salon", "Italian restaurant")
   "dateTime": string | null,        // ISO 8601 — convert relative times like "tomorrow 8pm" to absolute. Use local time (no UTC offset needed).
   "addToCalendar": boolean,         // true if user says "add to calendar", "put it on my calendar", etc.
   "noFurtherQuestions": boolean,    // true if user says "no further questions", "no questions", "just do it", etc.
-  "locationMentioned": string | null // Location if explicitly stated by user (e.g. "near downtown Austin")
+  "locationMentioned": string | null, // Location if explicitly stated by user (e.g. "near downtown Austin")
+  "editFrom": string | null,        // For calendar_edit: the current event title to search for
+  "editTo": string | null           // For calendar_edit: the new title to replace it with
 }
 
 Examples:
 - "hey book me a hair appointment tmrw 8pm no questions add to cal" → intent: business_search, service: hair salon, dateTime: <tomorrow 8pm>, addToCalendar: true, noFurtherQuestions: true
 - "add dentist appt thursday 3pm" → intent: calendar_add, dateTime: <thursday 3pm>
 - "delete all my appointments" / "remove every event" / "clear my calendar" → intent: calendar_delete
-- "stop calling" → intent: cancel`,
+- "change exam to OS exam" / "rename exam to OS exam" / "update my dentist event to dentist cleaning" → intent: calendar_edit, editFrom: "exam", editTo: "OS exam"
+- "stop" / "stop calling" / "cancel" / "nevermind" / "abort" → intent: cancel
+- "call again" / "try again" / "retry" / "call them again" / "try calling again" → intent: business_search (these are RETRY requests, NOT cancel)`,
       },
       { role: "user", content: rawQuery },
     ],
@@ -193,28 +199,46 @@ export async function evaluateSearchResults(
 export async function scoreAndRankResults(
   query: string,
   results: BusinessResult[],
-  prefs: UserPrefs
+  prefs: UserPrefs,
+  userProfile?: { name?: string; location?: string; hairType?: string; budget?: string; notes?: string }
 ): Promise<RankedBusiness[]> {
+  const profileLines: string[] = [];
+  if (userProfile?.hairType) profileLines.push(`Hair type / preferences: ${userProfile.hairType}`);
+  if (userProfile?.budget) profileLines.push(`Budget: ${userProfile.budget}`);
+  if (userProfile?.notes) profileLines.push(`Additional notes: ${userProfile.notes}`);
+
   const completion = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: `You are Donna's scoring engine. Score each business 1-10 based on how well it matches the query and preferences. Return JSON: { "businesses": [ { "name", "address", "phone", "onlineBookingUrl", "description", "url", "score", "reasoning" } ] } ranked best-first.`,
+        content: `You are Donna's scoring engine. Score each business 1–10 on how well it fits the client's request. Return JSON: { "businesses": [ { "name", "address", "phone", "onlineBookingUrl", "description", "url", "score", "reasoning" } ] } ranked best-first.
+
+Scoring rubric (apply all that apply):
+- +3 pts: Service clearly matches what the client needs (e.g. specializes in their hair type, cuisine, etc.)
+- +2 pts: Business has online booking or a phone number to call
+- +2 pts: Appears to be within the client's budget range
+- +1 pt: Has strong reviews or is well-known/reputable
+- +1 pt: Address is close to the client's location
+- -2 pts: Likely outside the client's budget (too expensive or too cheap)
+- -2 pts: Mismatch with specific client needs (e.g. doesn't do curly hair, wrong cuisine)
+- -1 pt: No phone number and no online booking (hard to reach)`,
       },
       {
         role: "user",
-        content: `Query: "${query}"
+        content: `Client request: "${query}"
 
-User preferences:
-${Object.entries(prefs).filter(([, v]) => v).map(([k, v]) => `- ${k}: ${v}`).join("\n")}
+Timing: ${prefs.timeWindow || "flexible"}
+Location: ${prefs.location || "unspecified"}
+${prefs.budget ? `Budget: ${prefs.budget}` : ""}
+${profileLines.length > 0 ? `\nClient profile:\n${profileLines.map(l => `- ${l}`).join("\n")}` : ""}
 
-Businesses:
+Businesses to score:
 ${results.map((r, i) => `${i + 1}. ${r.name}
    Address: ${r.address}
-   Phone: ${r.phone || ""}
-   Online booking URL: ${r.onlineBookingUrl || ""}
+   Phone: ${r.phone || "none"}
+   Online booking: ${r.onlineBookingUrl || "none"}
    Description: ${r.description}`).join("\n\n")}`,
       },
     ],
@@ -229,6 +253,53 @@ ${results.map((r, i) => `${i + 1}. ${r.name}
       onlineBookingUrl: b.onlineBookingUrl && b.onlineBookingUrl !== "none" && b.onlineBookingUrl !== "unknown" && b.onlineBookingUrl.startsWith("http") ? b.onlineBookingUrl : null,
     }))
     .sort((a, b) => b.score - a.score);
+}
+
+// Donna's spoken summary after a call — sharp, factual, first-person
+export async function summarizeCallForDonna(
+  transcript: string,
+  businessName: string
+): Promise<string> {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna, a sharp executive AI assistant. Summarize this call in 1–2 sentences in first person, like you made the call yourself.
+
+Rules:
+- ALWAYS state the outcome first: booked, unavailable, no answer, or unclear.
+- If booked: include the specific date/time and price. Example: "Booked. Thursday at 2pm, $85."
+- If unavailable: say why if known. Example: "No availability Thursday — they're fully booked."
+- If no answer / voicemail: "No answer at ${businessName}. I'll try again or move to the next option."
+- Keep it under 30 words. No filler. No "I called and..." preamble — get straight to the result.`,
+      },
+      {
+        role: "user",
+        content: `Business: ${businessName}\nTranscript:\n${transcript}`,
+      },
+    ],
+  });
+  return completion.choices[0].message.content?.trim() ?? `I called ${businessName} — check the transcript for details.`;
+}
+
+// Donna's in-character reply to casual/conversational messages
+export async function generateDonnaReply(rawQuery: string): Promise<string> {
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      {
+        role: "system",
+        content: `You are Donna — a sharp, witty AI executive assistant. Think of the character Donna from Suits: composed, confident, and two steps ahead. You handle anything from booking restaurants to scheduling meetings to calling businesses on the client's behalf.
+
+When the client makes small talk, chats, or asks how you're doing, respond in character — brief, warm, and a little dry. Keep it 1-2 sentences max. Then gently redirect toward what you can actually do for them.
+
+Never be robotic or formal. You're Donna, not a chatbot.`,
+      },
+      { role: "user", content: rawQuery },
+    ],
+  });
+  return completion.choices[0].message.content?.trim() ?? "On it. What do you need?";
 }
 
 //Summarize a Vapi call transcript and extract booking result
