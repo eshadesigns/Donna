@@ -7,7 +7,22 @@ import type { ClarifyingQuestion, RankedBusiness } from "@/lib/gemini";
 const donnaImg = "/images/donna.png";
 
 type Phase = "idle" | "clarifying" | "searching" | "ranking" | "working" | "done" | "error";
-type View = "home" | "donna" | "calendar" | "activity" | "settings";
+type View = "home" | "donna" | "calendar" | "activity" | "profile" | "settings";
+
+interface UserProfile {
+  name: string;
+  location: string;
+  hairType: string;
+  budget: string;
+  notes: string;
+}
+
+const PROFILE_KEY = "donna_user_profile";
+function loadProfile(): UserProfile {
+  if (typeof window === "undefined") return { name: "", location: "", hairType: "", budget: "", notes: "" };
+  try { return JSON.parse(localStorage.getItem(PROFILE_KEY) || "{}"); } catch { return { name: "", location: "", hairType: "", budget: "", notes: "" }; }
+}
+function saveProfile(p: UserProfile) { localStorage.setItem(PROFILE_KEY, JSON.stringify(p)); }
 
 interface BusinessUpdate {
   name: string;
@@ -17,6 +32,15 @@ interface BusinessUpdate {
   callId?: string;
   scheduledTime?: string;
   timestamp: Date;
+}
+
+interface CallRecord {
+  businessName: string;
+  timeWindow?: string;
+  callId?: string;
+  transcript?: string;
+  summary?: string;
+  time: string;
 }
 
 type ChatMessage =
@@ -35,7 +59,7 @@ const iconPaths: Record<string, string> = {
   email: "M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z",
   calendar: "M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V8h14v11zM7 10h5v5H7z",
   activity: "M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z",
-  people: "M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z",
+  person: "M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z",
   help: "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 17h-2v-2h2v2zm2.07-7.75l-.9.92C13.45 12.9 13 13.5 13 15h-2v-.5c0-1.1.45-2.1 1.17-2.83l1.24-1.26c.37-.36.59-.86.59-1.41 0-1.1-.9-2-2-2s-2 .9-2 2H8c0-2.21 1.79-4 4-4s4 1.79 4 4c0 .88-.36 1.68-.93 2.25z",
   settings: "M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z",
   logout: "M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z",
@@ -54,6 +78,7 @@ function NavBtn({ icon, active, onClick, title, size = 19 }: { icon: string; act
 export default function Home() {
   const [view, setView] = useState<View>("home");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [expandedCall, setExpandedCall] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [inputVal, setInputVal] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -66,6 +91,9 @@ export default function Home() {
   const [wakeTriggered, setWakeTriggered] = useState(false);
   const [toastText, setToastText] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
+  const [callRecords, setCallRecords] = useState<CallRecord[]>([]);
+  const [profile, setProfile] = useState<UserProfile>({ name: "", location: "", hairType: "", budget: "", notes: "" });
+  useEffect(() => { setProfile(loadProfile()); }, []);
   const readerRef = useRef<ReadableStreamDefaultReader | null>(null);
   const recognitionRef = useRef<{ stop(): void } | null>(null);
   const wakeRecognitionRef = useRef<{ stop(): void } | null>(null);
@@ -198,6 +226,14 @@ export default function Home() {
     unlockAudio();
     const q = (overrideText ?? inputVal).trim();
     if (!q || phase === "searching" || phase === "ranking" || phase === "working") return;
+
+    // If a clarify card is showing, treat the typed message as the time answer
+    if (phase === "clarifying") {
+      setInputVal("");
+      appendMessage({ type: "user", text: q, time: ts() });
+      handleAnswers({ time: q });
+      return;
+    }
     setInputVal("");
     if (textareaRef.current) { textareaRef.current.style.height = "auto"; }
     setQuery(q);
@@ -211,7 +247,7 @@ export default function Home() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q }),
+        body: JSON.stringify({ query: q, userProfile: profile }),
       });
 
       const data = await res.json() as { questions?: ClarifyingQuestion[]; error?: string; done?: boolean; message?: string };
@@ -235,10 +271,7 @@ export default function Home() {
         removeWorking();
         setPhase("clarifying");
         appendMessage({ type: "clarify", questions: data.questions });
-        if (voiceOn) {
-          const spoken = "I have a few quick questions. " + data.questions.map((q) => q.question).join(" ");
-          speakText(spoken);
-        }
+        if (voiceOn) speakText(data.questions[0].question);
         return;
       }
       // Fallthrough — questions was empty (e.g. AI skipped them) but nothing else came back
@@ -258,9 +291,9 @@ export default function Home() {
     appendMessage({ type: "working", text: "Donna's scanning the web..." });
 
     const prefs = {
-      location: answers["location"] ?? answers[Object.keys(answers)[0]],
+      location: answers["location"] ?? "",
       date: answers["date"],
-      timeWindow: answers["time"] ?? answers["timeWindow"],
+      timeWindow: answers["time"] ?? answers["timeWindow"] ?? answers[Object.keys(answers)[0]],
       budget: answers["budget"],
       radius: answers["radius"],
       ...answers,
@@ -270,7 +303,7 @@ export default function Home() {
       const res = await fetch("/api/query", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query, prefs }),
+        body: JSON.stringify({ query, prefs, userProfile: profile }),
       });
 
       if (!res.body) throw new Error("No stream");
@@ -346,9 +379,33 @@ export default function Home() {
       case "done": {
         removeWorking();
         setPhase("done");
-        const doneMsg = "Done. You're all set.";
-        appendMessage({ type: "donna", text: doneMsg, time: ts() });
-        if (voiceOn) speakText(doneMsg);
+        if (event.businessName) {
+          setCallRecords(prev => {
+            const name = event.businessName as string;
+            // call_result may have already created this record with transcript — don't overwrite
+            if (prev.some(r => r.businessName === name)) return prev;
+            return [...prev, {
+              businessName: name,
+              timeWindow: event.timeWindow as string | undefined,
+              time: ts(),
+            }];
+          });
+        }
+        break;
+      }
+
+      case "call_result": {
+        const summary = event.summary as string;
+        const name = event.name as string;
+        const callId = event.callId as string;
+        const transcript = event.transcript as string;
+        appendMessage({ type: "donna", text: summary, time: ts() });
+        if (voiceOn) speakText(summary);
+        setCallRecords(prev => {
+          const exists = prev.some(r => r.businessName === name);
+          if (exists) return prev.map(r => r.businessName === name ? { ...r, callId, transcript, summary } : r);
+          return [...prev, { businessName: name, callId, transcript, summary, time: ts() }];
+        });
         break;
       }
 
@@ -415,24 +472,57 @@ export default function Home() {
     if (!SR) { showToast("Voice input not supported in this browser."); return; }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rec = new SR() as any;
-    rec.continuous = false;
-    rec.interimResults = false;
+    rec.continuous = true;       // keep listening through natural pauses
+    rec.interimResults = true;   // show live transcription as user speaks
     rec.lang = "en-US";
-    rec.onresult = (e: { results: { [k: number]: { [k: number]: { transcript: string } } } }) => {
-      const transcript = e.results[0][0].transcript;
-      setInputVal(transcript);
-      setListening(false);
-      handleSend(transcript);
+
+    let finalTranscript = "";
+    let autoSubmitTimer: ReturnType<typeof setTimeout> | null = null;
+    let submitted = false;
+
+    function doSubmit() {
+      if (submitted) return;
+      submitted = true;
+      const text = finalTranscript.trim();
+      if (text) { setInputVal(text); handleSend(text); }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    rec.onresult = (e: any) => {
+      let interim = "";
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          finalTranscript += e.results[i][0].transcript + " ";
+        } else {
+          interim = e.results[i][0].transcript;
+        }
+      }
+      setInputVal((finalTranscript + interim).trim());
+
+      // After each final chunk, reset the auto-submit countdown
+      if (e.results[e.results.length - 1]?.isFinal && finalTranscript.trim()) {
+        if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
+        autoSubmitTimer = setTimeout(() => { rec.stop(); doSubmit(); }, 1800);
+      }
     };
+
     rec.onerror = (e: { error: string }) => {
+      if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
       wakeJustFiredRef.current = false;
       setListening(false);
-      if (e.error === "aborted") return; // expected when wake word rec stops — not a real error
+      if (e.error === "aborted") return;
       if (e.error === "not-allowed") showToast("Microphone blocked — allow mic access in browser settings.");
       else if (e.error === "no-speech") showToast("No speech detected. Try again.");
       else showToast(`Mic error: ${e.error}`);
     };
-    rec.onend = () => { wakeJustFiredRef.current = false; setListening(false); };
+
+    rec.onend = () => {
+      if (autoSubmitTimer) clearTimeout(autoSubmitTimer);
+      wakeJustFiredRef.current = false;
+      setListening(false);
+      doSubmit(); // submit whatever was captured if not already sent
+    };
+
     recognitionRef.current = rec;
     try {
       rec.start();
@@ -552,7 +642,6 @@ export default function Home() {
     </div>
   );
 
-  const activityMessages = messages.filter((m) => m.type === "user" || m.type === "donna");
 
   return (
     <div className="app">
@@ -563,7 +652,7 @@ export default function Home() {
           <NavBtn icon="email" size={19} active={view === "donna"} onClick={() => setView("donna")} title="Talk to Donna" />
           <NavBtn icon="calendar" size={19} active={view === "calendar"} onClick={() => setView("calendar")} title="Calendar" />
           <NavBtn icon="activity" size={19} active={view === "activity"} onClick={() => setView("activity")} title="Activity" />
-          <NavBtn icon="people" size={19} active={false} onClick={() => {}} title="Team" />
+          <NavBtn icon="person" size={19} active={view === "profile"} onClick={() => setView("profile")} title="My Profile" />
         </nav>
         <div className="sb-bot">
           <NavBtn icon="help" size={17} active={false} onClick={() => {}} title="Help" />
@@ -673,34 +762,92 @@ export default function Home() {
             <div className="full-view">
               <div className="view-header">
                 <h2>Activity</h2>
-                <span className="view-sub">{activityMessages.length} messages</span>
+                <span className="view-sub">{callRecords.length} call{callRecords.length !== 1 ? "s" : ""} placed</span>
               </div>
               <div className="activity-list">
-                {activityMessages.length === 0 ? (
-                  <div className="empty-activity">No messages yet. Start a conversation with Donna.</div>
+                {callRecords.length === 0 ? (
+                  <div className="empty-activity">No calls yet. Ask Donna to find and book something.</div>
                 ) : (
-                  activityMessages.map((msg, i) => {
-                    if (msg.type === "user") {
-                      return (
-                        <div key={i} className="activity-item user">
-                          <div className="activity-role">You</div>
-                          <div className="activity-text">{msg.text}</div>
-                          <div className="activity-time">{msg.time}</div>
+                  callRecords.map((rec, i) => {
+                    const key = `${rec.businessName}-${i}`;
+                    const expanded = expandedCall === key;
+                    return (
+                      <div key={key} className="activity-item donna" style={{ cursor: rec.transcript ? "pointer" : "default" }} onClick={() => rec.transcript && setExpandedCall(expanded ? null : key)}>
+                        <div className="activity-role">{rec.transcript ? (expanded ? "▾ Call transcript" : "▸ Call placed — click for transcript") : "On call..."}</div>
+                        <div className="activity-text">
+                          <strong>{rec.businessName}</strong>
+                          {rec.timeWindow && <> — {rec.timeWindow}</>}
                         </div>
-                      );
-                    }
-                    if (msg.type === "donna") {
-                      return (
-                        <div key={i} className="activity-item donna">
-                          <div className="activity-role">Donna</div>
-                          <div className="activity-text">{msg.text}</div>
-                          <div className="activity-time">{msg.time}</div>
-                        </div>
-                      );
-                    }
-                    return null;
+                        {rec.summary && <div className="activity-text" style={{ opacity: 0.8, fontStyle: "italic" }}>{rec.summary}</div>}
+                        {expanded && rec.transcript && (
+                          <div className="activity-text" style={{ marginTop: "0.5rem", fontSize: "0.8rem", opacity: 0.7, whiteSpace: "pre-wrap", borderTop: "1px solid rgba(255,255,255,0.1)", paddingTop: "0.5rem" }}>
+                            {rec.transcript}
+                          </div>
+                        )}
+                        <div className="activity-time">{rec.time}</div>
+                      </div>
+                    );
                   })
                 )}
+              </div>
+            </div>
+          )}
+
+          {view === "profile" && (
+            <div className="full-view">
+              <div className="view-header">
+                <h2>Your Profile</h2>
+                <span className="view-sub">The more Donna knows, the less she has to ask</span>
+              </div>
+              <div className="settings-list">
+                <div className="settings-section">
+                  <div className="settings-title">The Basics</div>
+                  {([
+                    { key: "name", label: "Name", placeholder: "e.g. Harvey" },
+                    { key: "location", label: "Where you're based", placeholder: "e.g. Midtown Manhattan, NY" },
+                    { key: "budget", label: "Spending range", placeholder: "e.g. $100–$200, or 'mid-range'" },
+                  ] as { key: keyof UserProfile; label: string; placeholder: string }[]).map(({ key, label, placeholder }) => (
+                    <div key={key} className="settings-row profile-row">
+                      <label className="profile-label">{label}</label>
+                      <input
+                        className="profile-input"
+                        placeholder={placeholder}
+                        value={profile[key]}
+                        onChange={(e) => setProfile((p) => ({ ...p, [key]: e.target.value }))}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="settings-section">
+                  <div className="settings-title">Preferences & Context</div>
+                  <div className="settings-row profile-row">
+                    <label className="profile-label">Personal preferences</label>
+                    <input
+                      className="profile-input"
+                      placeholder="e.g. curly hair, vegetarian, prefer female providers"
+                      value={profile.hairType}
+                      onChange={(e) => setProfile((p) => ({ ...p, hairType: e.target.value }))}
+                    />
+                  </div>
+                  <div className="settings-row profile-row">
+                    <label className="profile-label">Anything else</label>
+                    <textarea
+                      className="profile-input"
+                      placeholder="e.g. I'm usually free evenings, no peanuts, always running 10 min late"
+                      rows={3}
+                      value={profile.notes}
+                      onChange={(e) => setProfile((p) => ({ ...p, notes: e.target.value }))}
+                    />
+                  </div>
+                  <button
+                    className="clarify-submit"
+                    style={{ marginTop: "1rem" }}
+                    onClick={() => { saveProfile(profile); showToast("Saved."); }}
+                    type="button"
+                  >
+                    Save
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -876,7 +1023,7 @@ function BizList({ businesses, allUpdates, getLatestUpdate }: {
         const update = getLatestUpdate(b.name, allUpdates);
         const isActive = update?.status === "calling" || update?.status === "call_initiated";
         return (
-          <div key={b.name} className={`biz-card${isActive ? " active" : ""}`}>
+          <div key={`${b.name}-${i}`} className={`biz-card${isActive ? " active" : ""}`}>
             <div className="biz-row">
               <span className="biz-rank">#{i + 1}</span>
               <span className="biz-name">{b.name}</span>
